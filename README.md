@@ -1,126 +1,126 @@
 # WiDash
 
-Lokales RMA-Dashboard für DCEng-Engineers. Verbindet sich über die Salesforce CLI mit GUS, zeigt Coolan-Komponenten und den Master-Patchplan — alles lokal auf deinem Mac, keine Cloud.
+A local RMA dashboard for DCEng engineers. Connects to GUS via the Salesforce CLI, shows Coolan components and the master patchplan — everything runs locally on your Mac, no cloud involved.
 
 ---
 
-## Voraussetzungen
+## Prerequisites
 
-Einmalig prüfen ob folgendes installiert ist:
+Check that the following are installed:
 
 **Python 3.11**
 ```bash
 python3.11 --version
 ```
-Nicht vorhanden → [python.org/downloads](https://www.python.org/downloads/) oder `brew install python@3.11`
+Not found → [python.org/downloads](https://www.python.org/downloads/) or `brew install python@3.11`
 
 **Salesforce CLI**
 ```bash
 sf --version
 ```
-Nicht vorhanden → [developer.salesforce.com/tools/salesforcecli](https://developer.salesforce.com/tools/salesforcecli)
+Not found → [developer.salesforce.com/tools/salesforcecli](https://developer.salesforce.com/tools/salesforcecli)
 
 **Git**
 ```bash
 git --version
 ```
-Auf dem Mac normalerweise vorinstalliert.
+Usually pre-installed on macOS.
 
 ---
 
 ## Installation
 
-### Schritt 1 — Repo herunterladen
+### Step 1 — Clone the repo
 
-Terminal öffnen (Spotlight → „Terminal") und folgendes eingeben:
+Open a Terminal (Spotlight → "Terminal") and run:
 
 ```bash
 git clone https://github.com/nelamin-ops/widash-releases.git
 cd widash-releases
 ```
 
-### Schritt 2 — Installieren
+### Step 2 — Run the installer
 
 ```bash
 ./install.sh
 ```
 
-Das Script richtet alles automatisch ein (Python-Umgebung, Frontend-Abhängigkeiten, Ordnerstruktur). Dauert ca. 1–2 Minuten.
+This sets up everything automatically (Python environment, frontend dependencies, folder structure). Takes about 1–2 minutes.
 
-### Schritt 3 — Salesforce einloggen
+### Step 3 — Log in to Salesforce
 
 ```bash
 sf org login web
 ```
 
-Ein Browser öffnet sich — normal mit deinen Salesforce-Zugangsdaten einloggen, dann Fenster schließen. Dieser Schritt ist nötig damit WiDash auf GUS zugreifen kann. Die Zugangsdaten verlassen deinen Mac nicht.
+A browser window opens — log in with your Salesforce credentials, then close the tab. This is required so WiDash can access GUS. Your credentials never leave your Mac.
 
-### Schritt 4 — WiDash starten
+### Step 4 — Start WiDash
 
 ```bash
 ./start.sh
 ```
 
-Der Browser öffnet sich automatisch mit dem Dashboard auf `http://localhost:5173`.
+Your browser opens automatically with the dashboard at `http://localhost:5173`.
 
-Beim ersten Start erscheint das **Region Settings**-Fenster — dort deinen GUS RMA-Report auswählen oder die Report-ID eingeben.
+On first launch the **Region Settings** dialog appears — select your GUS RMA report from the dropdown or enter your report ID manually.
 
 ---
 
-## Tägliche Nutzung
+## Daily use
 
-**Starten:**
+**Start:**
 ```bash
 cd widash-releases
 ./start.sh
 ```
 
-**Stoppen:** `Ctrl+C` im Terminal
+**Stop:** `Ctrl+C` in the terminal
 
-**Salesforce-Session abgelaufen?** (roter Banner im Dashboard)
+**Salesforce session expired?** (red banner in the dashboard)
 ```bash
 sf org login web
 ```
-Danach im Dashboard auf „Retry" klicken.
+Then click "Retry" in the dashboard.
 
 ---
 
 ## Updates
 
-Wenn eine neue Version verfügbar ist, erscheint im Dashboard oben ein Banner.
+When a new version is available, a banner appears at the top of the dashboard.
 
-Update durchführen:
+To update:
 ```bash
 cd widash-releases
 ./update.sh
 ```
 
-Danach `./start.sh` wie gewohnt.
+Then start as usual with `./start.sh`.
 
 ---
 
-## Patchplan einrichten (optional)
+## Patchplan setup (optional)
 
-Für die Connections-Sektion in Ticket-Sheets brauchst du lokale CSV-Exports des Master Patchplans:
+To use the Connections section in ticket sheets, you need local CSV exports of the master patchplan:
 
-1. Master Patchplan in Google Sheets öffnen
-2. Für jeden Tab: **Datei → Herunterladen → CSV**
-3. Alle CSVs in diesen Ordner legen:
+1. Open the master patchplan in Google Sheets
+2. For each tab: **File → Download → CSV**
+3. Place all CSVs in this folder:
 ```
 ~/Library/Application Support/WiDash/patchplan/
 ```
-4. Dashboard neu laden — Connections erscheint automatisch
+4. Reload the dashboard — Connections will appear automatically in ticket sheets
 
 ---
 
-## Probleme?
+## Troubleshooting
 
-| Problem | Lösung |
+| Problem | Solution |
 |---|---|
-| `python3.11: command not found` | Python 3.11 installieren (siehe oben) |
-| `sf: command not found` | Salesforce CLI installieren (siehe oben) |
-| Weißer Bildschirm | Tab neu laden mit `⌘R` |
-| Dashboard leer / Fehler | `sf org login web` im Terminal ausführen |
-| Port bereits belegt | `./start.sh` erneut ausführen (beendet alte Prozesse automatisch) |
+| `python3.11: command not found` | Install Python 3.11 (see above) |
+| `sf: command not found` | Install Salesforce CLI (see above) |
+| White screen | Reload the tab with `⌘R` |
+| Dashboard empty / error | Run `sf org login web` in the terminal |
+| Port already in use | Run `./start.sh` again (kills stale processes automatically) |
 
-Fragen oder Probleme → Najih El Amin
+Questions or issues → Najih El Amin
