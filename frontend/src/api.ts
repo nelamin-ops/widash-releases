@@ -1,0 +1,382 @@
+import type {
+  ActivityFilter,
+  ActivityResponse,
+  ApiError,
+  CaseDetailResponse,
+  CoolanComponentsResponse,
+  RmaActiveResponse,
+  RmaDetailResponse,
+} from "./types";
+
+async function handle<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const err: ApiError = await res.json().catch(() => ({
+      error: "unknown",
+    }));
+    throw err;
+  }
+  return res.json() as Promise<T>;
+}
+
+// Legacy single-id key — read once for migration so users who set
+// up a single region keep working after upgrading to the multi-report
+// settings.
+const LEGACY_REPORT_ID_KEY = "widash.reportId";
+const REPORT_IDS_KEY = "widash.reportIds";
+
+export function getActiveReportIds(): string[] {
+  try {
+    const raw = localStorage.getItem(REPORT_IDS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((x): x is string => typeof x === "string" && x.length > 0);
+      }
+    }
+    const legacy = localStorage.getItem(LEGACY_REPORT_ID_KEY);
+    return legacy ? [legacy] : [];
+  } catch { return []; }
+}
+
+export function setActiveReportIds(ids: string[]): void {
+  try {
+    const cleaned = ids.filter((x) => typeof x === "string" && x.length > 0);
+    if (cleaned.length > 0) {
+      localStorage.setItem(REPORT_IDS_KEY, JSON.stringify(cleaned));
+    } else {
+      localStorage.removeItem(REPORT_IDS_KEY);
+    }
+    // Also clear the legacy single-id key so the two never disagree.
+    localStorage.removeItem(LEGACY_REPORT_ID_KEY);
+  } catch { /* ignore */ }
+}
+
+// Backwards-compat shims for callers still on the single-id API.
+export function getActiveReportId(): string {
+  return getActiveReportIds()[0] || "";
+}
+export function setActiveReportId(id: string): void {
+  setActiveReportIds(id ? [id] : []);
+}
+
+/** Fetch wrapper that auto-attaches X-Report-Id when one or more are
+ *  set in localStorage. Backend parses the header as a comma-separated
+ *  list and merges the responses across regions. */
+function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const ids = getActiveReportIds();
+  if (ids.length === 0) return fetch(input, init);
+  const headers = new Headers(init.headers || {});
+  headers.set("X-Report-Id", ids.join(","));
+  return fetch(input, { ...init, headers });
+}
+
+function locationsParam(locations?: Set<string>): string {
+  if (!locations || locations.size === 0) return "";
+  return `&locations=${[...locations].join(",")}`;
+}
+
+function locationsQuery(locations?: Set<string>): string {
+  if (!locations || locations.size === 0) return "";
+  return `?locations=${[...locations].join(",")}`;
+}
+
+export function fetchActive(locations?: Set<string>): Promise<RmaActiveResponse> {
+  return apiFetch(`/api/rma/active${locationsQuery(locations)}`)
+    .then(handle<RmaActiveResponse>);
+}
+
+export function fetchDetails(
+  status: string, locations?: Set<string>,
+): Promise<RmaDetailResponse> {
+  return apiFetch(
+    `/api/rma/active/${encodeURIComponent(status)}${locationsQuery(locations)}`
+  ).then(handle<RmaDetailResponse>);
+}
+
+export function fetchActivity(
+  type: ActivityFilter,
+  limit: number,
+  locations?: Set<string>,
+  includeBots: boolean = false,
+): Promise<ActivityResponse> {
+  const bots = includeBots ? "&includeBots=true" : "";
+  return apiFetch(
+    `/api/activity?type=${type}&limit=${limit}${locationsParam(locations)}${bots}`,
+  ).then(handle<ActivityResponse>);
+}
+
+export function refresh(): Promise<{ status: string }> {
+  return apiFetch("/api/refresh", { method: "POST" }).then(handle<{ status: string }>);
+}
+
+export function fetchCaseDetail(caseId: string): Promise<CaseDetailResponse> {
+  return apiFetch(`/api/case/${encodeURIComponent(caseId)}`)
+    .then(handle<CaseDetailResponse>);
+}
+
+export interface WriteChange {
+  apiName: string;
+  value: string | number | boolean | null;
+}
+
+async function patch(url: string, changes: WriteChange[]) {
+  const r = await apiFetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ changes }),
+  });
+  return handle<{ status: string }>(r);
+}
+
+export function patchCase(caseId: string, changes: WriteChange[]) {
+  return patch(`/api/case/${encodeURIComponent(caseId)}`, changes);
+}
+
+export function patchAsset(assetId: string, changes: WriteChange[]) {
+  return patch(`/api/asset/${encodeURIComponent(assetId)}`, changes);
+}
+
+export interface CommentBody {
+  source: "chatter" | "caseComments";
+  body: string;
+  parentFeedItemId?: string;
+}
+
+export async function postCaseComment(caseId: string, payload: CommentBody) {
+  const r = await apiFetch(
+    `/api/case/${encodeURIComponent(caseId)}/comment`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return handle<{ status: string }>(r);
+}
+
+export async function patchChatterEntry(
+  caseId: string,
+  entryId: string,
+  kind: "post" | "comment",
+  body: string,
+) {
+  const r = await apiFetch(
+    `/api/case/${encodeURIComponent(caseId)}/comment/${encodeURIComponent(entryId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, body }),
+    },
+  );
+  return handle<{ status: string }>(r);
+}
+
+export interface MeResponse {
+  id: string;
+  username: string;
+  name: string;
+}
+
+export function fetchMe(): Promise<MeResponse> {
+  return apiFetch("/api/me").then(handle<MeResponse>);
+}
+
+export interface RegionDetectResponse {
+  userId: string;
+  sitePrefix: string | null;
+  suggestedReportId: string | null;
+  knownRegions: string[];
+  siteCounts: Record<string, number>;
+  sampleSize: number;
+}
+
+export function detectRegion(): Promise<RegionDetectResponse> {
+  return apiFetch("/api/region/detect").then(handle<RegionDetectResponse>);
+}
+
+export interface RegionEntry {
+  prefix: string;
+  reportId: string;
+}
+
+export interface RegionsResponse {
+  regions: RegionEntry[];
+}
+
+export function fetchRegions(): Promise<RegionsResponse> {
+  return apiFetch("/api/regions").then(handle<RegionsResponse>);
+}
+
+export interface CaseFeedEntry {
+  id: string;
+  kind: "post" | "comment" | "trackedChange";
+  source: "chatter" | "caseComments" | "email";
+  parentId?: string;
+  author: string;
+  authorUsername?: string;
+  authorPhotoUrl?: string;
+  /** True when CreatedById matches the current SF session user. The
+   *  backend resolves this once per request so the FE can gate the
+   *  "edit own post" affordance without re-querying. */
+  isMine?: boolean;
+  at: string;
+  body: string;
+  incoming?: boolean;
+  fromValue?: string;
+  toValue?: string;
+  fieldLabel?: string;
+}
+
+export interface CaseFeedResponse {
+  caseId: string;
+  entries: CaseFeedEntry[];
+}
+
+export interface LookupResult {
+  id: string;
+  name: string;
+}
+
+export interface LookupSearchOptions {
+  /** SM_General_Picklist__c partition: Category / Subcategory / Resolution. */
+  listType?: string | null;
+  /** SM_General_Picklist__c parent-id filter (cascading subcategory). */
+  parentId?: string | null;
+  /** SM_General_Picklist__c Object_RecordType_Filter__c value (e.g. "RMA"). */
+  recordTypeFilter?: string | null;
+}
+
+export function searchLookup(
+  sobject: string, q: string, limit = 12,
+  options: LookupSearchOptions = {},
+): Promise<{ sobject: string; results: LookupResult[] }> {
+  const params = new URLSearchParams();
+  params.set("q", q);
+  params.set("limit", String(limit));
+  if (options.listType) params.set("listType", options.listType);
+  if (options.parentId) params.set("parentId", options.parentId);
+  if (options.recordTypeFilter) {
+    params.set("recordTypeFilter", options.recordTypeFilter);
+  }
+  return apiFetch(
+    `/api/lookup/${encodeURIComponent(sobject)}?${params.toString()}`,
+  ).then(handle<{ sobject: string; results: LookupResult[] }>);
+}
+
+export function fetchCaseFeed(
+  caseId: string, limit = 50,
+): Promise<CaseFeedResponse> {
+  return apiFetch(
+    `/api/case/${encodeURIComponent(caseId)}/feed?limit=${limit}`,
+  ).then(handle<CaseFeedResponse>);
+}
+
+export interface PatchplanCableEnd {
+  device: string;
+  port: string;
+  make: string;
+  room: string;
+  rack: string;
+  uLoc: string;
+  tile: string;
+}
+
+export interface PatchplanCableHop {
+  label: string;
+  panel: string;
+  port: string;
+}
+
+export interface PatchplanCable {
+  cableId: string;
+  tab: string;
+  cabled: string;
+  cableType: string;
+  length: string;
+  comment: string;
+  sideA: PatchplanCableEnd;
+  sideB: PatchplanCableEnd;
+  hops: PatchplanCableHop[];
+}
+
+export interface PatchplanCablesResponse {
+  hostname: string;
+  revision: string;
+  fetchedAt: number;
+  cables: PatchplanCable[];
+  totalIndexed: number;
+  knownHosts: number;
+}
+
+export function fetchPatchplanCables(
+  args: { hostname?: string; room?: string; rack?: string; q?: string },
+): Promise<PatchplanCablesResponse> {
+  const params = new URLSearchParams();
+  if (args.hostname) params.set("hostname", args.hostname);
+  if (args.room) params.set("room", args.room);
+  if (args.rack) params.set("rack", args.rack);
+  if (args.q) params.set("q", args.q);
+  return apiFetch(
+    `/api/patchplan/cables?${params.toString()}`,
+  ).then(handle<PatchplanCablesResponse>);
+}
+
+export interface PatchplanTreeDevice {
+  name: string;
+  cables: number;
+}
+export interface PatchplanTreeRack {
+  name: string;
+  cables: number;
+  devices: PatchplanTreeDevice[];
+}
+export interface PatchplanTreeRoom {
+  name: string;
+  cables: number;
+  racks: PatchplanTreeRack[];
+}
+export interface PatchplanTreeResponse {
+  rooms: PatchplanTreeRoom[];
+  hiddenRoomsCount: number;
+  totalCables: number;
+  totalHosts: number;
+  revision: string;
+  fetchedAt: number;
+}
+
+export function fetchPatchplanTree(
+  showAll = false,
+): Promise<PatchplanTreeResponse> {
+  const qs = showAll ? "?showAll=true" : "";
+  return apiFetch(`/api/patchplan/tree${qs}`).then(handle<PatchplanTreeResponse>);
+}
+
+export interface PatchplanRefreshResponse {
+  totalIndexed: number;
+  knownHosts: number;
+  revision: string;
+  fetchedAt: number;
+}
+
+export function refreshPatchplan(): Promise<PatchplanRefreshResponse> {
+  return apiFetch("/api/patchplan/refresh", { method: "POST" })
+    .then(handle<PatchplanRefreshResponse>);
+}
+
+export function fetchCoolanComponents(
+  uuid: string,
+): Promise<CoolanComponentsResponse> {
+  return apiFetch(`/api/coolan/machine/${encodeURIComponent(uuid)}/components`)
+    .then(handle<CoolanComponentsResponse>);
+}
+
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  url: string;
+  update_available: boolean;
+}
+
+export function fetchUpdateInfo(): Promise<UpdateInfo> {
+  return fetch("/api/update-info").then(handle<UpdateInfo>);
+}

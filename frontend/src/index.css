@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+
+  /* Surface tokens — used by .pill, dividers, hover overlays.
+     Default = dark theme. html:not(.dark) overrides for light. */
+  --surface-1: rgba(255, 255, 255, 0.05);
+  --surface-2: rgba(255, 255, 255, 0.10);
+  --surface-3: rgba(255, 255, 255, 0.15);
+  --border-soft: rgba(255, 255, 255, 0.10);
+  --border-medium: rgba(255, 255, 255, 0.15);
+  --divider: rgba(255, 255, 255, 0.06);
+  --text-primary: #e2e8f0;
+  --text-muted: rgba(226, 232, 240, 0.65);
+  --text-faint: rgba(226, 232, 240, 0.45);
+}
+
+html:not(.dark) {
+  --surface-1: rgba(15, 23, 42, 0.05);
+  --surface-2: rgba(15, 23, 42, 0.09);
+  --surface-3: rgba(15, 23, 42, 0.14);
+  --border-soft: rgba(15, 23, 42, 0.10);
+  --border-medium: rgba(15, 23, 42, 0.18);
+  --divider: rgba(15, 23, 42, 0.08);
+  --text-primary: #0f172a;
+  --text-muted: rgba(15, 23, 42, 0.65);
+  --text-faint: rgba(15, 23, 42, 0.45);
+}
+
+html, body, #root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--text-primary);
+  /* Solid base color so the fixed gradient layer underneath doesn't bleed
+     when the document is short. */
+  background: #0b1020;
+  transition: background 300ms ease, color 300ms ease;
+  min-height: 100vh;
+  position: relative;
+}
+html:not(.dark) body { background: #f1f5f9; }
+
+/* Fixed light-blob layer — stays in place behind scroll, never tiles. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(96, 165, 250, 0.18), transparent 45%),
+    radial-gradient(circle at 80% 80%, rgba(167, 139, 250, 0.18), transparent 45%);
+}
+html:not(.dark) body::before {
+  background:
+    radial-gradient(circle at 20% 10%, rgba(96, 165, 250, 0.30), transparent 45%),
+    radial-gradient(circle at 80% 80%, rgba(167, 139, 250, 0.30), transparent 45%);
+}
+
+@layer components {
+  .glass {
+    @apply rounded-panel;
+    border: 1px solid var(--border-soft);
+    background: rgba(15, 23, 42, 0.55);
+    backdrop-filter: blur(24px) saturate(180%);
+    position: relative;
+    overflow: hidden;
+  }
+  html:not(.dark) .glass {
+    background: rgba(255, 255, 255, 0.72);
+    border-color: rgba(15, 23, 42, 0.10);
+  }
+  .glass::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(
+      from 0deg,
+      #ff0080, #ffff00, #00ff80, #00ffff,
+      #0080ff, #8000ff, #ff0080
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: 0.4;
+    animation: spectrum 8s linear infinite;
+    pointer-events: none;
+  }
+  html:not(.dark) .glass::before { opacity: 0.25; }
+
+  .pill {
+    @apply rounded-full px-3 py-1 text-sm transition-colors;
+  }
+
+  .solid-panel {
+    @apply rounded-panel shadow-2xl;
+    background: rgb(15, 23, 42);
+    color: #e2e8f0;
+    border: 1px solid var(--border-medium);
+  }
+  html:not(.dark) .solid-panel {
+    background: rgb(255, 255, 255);
+    color: #0f172a;
+    border-color: rgba(15, 23, 42, 0.18);
+  }
+
+  /* Semantic surface utilities — automatically flip in light mode. */
+  .surface-1 { background: var(--surface-1); }
+  .surface-2 { background: var(--surface-2); }
+  .surface-3 { background: var(--surface-3); }
+  .surface-1-hover:hover { background: var(--surface-2); }
+  .surface-2-hover:hover { background: var(--surface-3); }
+  .border-soft { border-color: var(--border-soft); }
+  .border-medium { border-color: var(--border-medium); }
+  .divider-t { border-top: 1px solid var(--divider); }
+  .divider-b { border-bottom: 1px solid var(--divider); }
+  .text-muted { color: var(--text-muted); }
+  .text-faint { color: var(--text-faint); }
+}
