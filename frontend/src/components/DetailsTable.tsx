@@ -37,6 +37,15 @@ function filterText(
       return new Date(ticket.createdDate).toLocaleDateString(locale, {
         day: "2-digit", month: "2-digit",
       });
+    case "statusChangedAt": {
+      if (!ticket.statusChangedAt) return "";
+      const d = new Date(ticket.statusChangedAt);
+      return (
+        d.toLocaleDateString(locale, { day: "2-digit", month: "2-digit" })
+        + " " +
+        d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+      );
+    }
     default: return "";
   }
 }
@@ -200,6 +209,21 @@ export function DetailsTable({
             {formatDate(ticket.createdDate, locale)}
           </span>
         );
+      case "statusChangedAt": {
+        // Fall back to createdDate when no CaseHistory entry exists —
+        // this happens when the case was created directly in the current
+        // status (no prior transition recorded by Salesforce).
+        const raw = ticket.statusChangedAt || ticket.createdDate;
+        const d = new Date(raw);
+        const date = d.toLocaleDateString(locale, { day: "2-digit", month: "2-digit" });
+        const time = d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+        const isFallback = !ticket.statusChangedAt;
+        return (
+          <span className="whitespace-nowrap" title={isFallback ? "Kein Statuswechsel – Erstelldatum" : undefined}>
+            {date} {time}{isFallback && <span className="opacity-40 ml-0.5">*</span>}
+          </span>
+        );
+      }
       case "assignee":
         return (
           <TruncatedCell

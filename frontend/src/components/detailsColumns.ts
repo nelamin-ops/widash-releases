@@ -3,7 +3,7 @@ import type { RmaTicket } from "../types";
 export type DetailsColumnId =
   | "priority" | "name" | "location" | "componentType"
   | "assetName" | "assetLocationPath" | "assetType" | "description"
-  | "createdDate" | "assignee" | "coolan" | "gus";
+  | "createdDate" | "statusChangedAt" | "assignee" | "coolan" | "gus";
 
 export interface DetailsColumnDef {
   id: DetailsColumnId;
@@ -11,7 +11,7 @@ export interface DetailsColumnDef {
     | "details.colPriority" | "details.colTicketId" | "details.colLocation"
     | "details.colType" | "details.colAssetName" | "details.colAssetLocation"
     | "details.colAssetType" | "details.colDescription"
-    | "details.colCreated" | "details.colAssignee"
+    | "details.colCreated" | "details.colStatusChanged" | "details.colAssignee"
     | "details.colCoolan" | "details.colGus";
   width: number;
   sortable: boolean;
@@ -45,6 +45,8 @@ export const DETAILS_COLUMNS: DetailsColumnDef[] = [
   { id: "description", i18nKey: "details.colDescription", width: 200, sortable: false },
   { id: "createdDate", i18nKey: "details.colCreated", width: 90, sortable: true,
     accessor: (t) => new Date(t.createdDate).getTime() },
+  { id: "statusChangedAt", i18nKey: "details.colStatusChanged", width: 110, sortable: true,
+    accessor: (t) => new Date(t.statusChangedAt || t.createdDate).getTime() },
   { id: "assignee", i18nKey: "details.colAssignee", width: 160, sortable: true,
     accessor: (t) => t.assignee },
   { id: "coolan", i18nKey: "details.colCoolan", width: 60, sortable: false, alignRight: true },

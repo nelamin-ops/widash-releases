@@ -41,6 +41,7 @@ export interface RmaTicket {
   description: string;
   coolanLinks: CoolanLink[];
   coolanReportingState?: CoolanReportingState | null;
+  statusChangedAt?: string | null;
   gusUrl: string;
 }
 

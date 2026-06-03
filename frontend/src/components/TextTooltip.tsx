@@ -72,18 +72,17 @@ function loadGeometry(id: string): PersistedGeometry | null {
 
 /** Force the tooltip back into the viewport — caps the size to the
  *  available space and clamps the corner so at least the header is
- *  reachable. Called whenever we hand a geometry to the component
- *  (load, mount, window resize) so the user can never lose a tooltip
- *  off-screen. */
+ *  reachable. Top edge always wins: y is clamped to pad last so the
+ *  header + close button can never leave the screen. */
 function clampToViewport(g: PersistedGeometry): PersistedGeometry {
   const pad = 8;
-  // Header height — must remain on screen so the user can grab + close.
-  const HEADER_VISIBLE = 32;
   const w = Math.min(g.w, window.innerWidth - 2 * pad);
   const h = g.h > 0 ? Math.min(g.h, window.innerHeight - 2 * pad) : 0;
   const maxX = window.innerWidth - pad - Math.min(w, 80);
-  const maxY = window.innerHeight - pad - HEADER_VISIBLE;
+  // Bottom limit: tooltip may overflow bottom (it scrolls), but top must stay.
+  const maxY = window.innerHeight - pad - 32; // keep at least header visible
   const x = Math.max(pad, Math.min(g.x, maxX));
+  // Top wins: clamp to pad AFTER applying maxY so top is never hidden.
   const y = Math.max(pad, Math.min(g.y, maxY));
   return { x, y, w, h };
 }
@@ -97,21 +96,17 @@ export function TextTooltip({ tooltip, onClose, onFocus, zIndex }: TextTooltipPr
   const ref = useRef<HTMLDivElement | null>(null);
   const { t } = useLanguage();
 
-  // Position + size state. Saved geometry is clamped to the current
-  // viewport on load — a tooltip persisted off-screen (different monitor
-  // size, window resize) snaps back automatically.
+  // Position + size state.
+  // Saved width is reused but position always starts at the spawn point —
+  // a stale saved position (from a different screen size or a previous
+  // session where the tooltip ended up off-screen) would otherwise
+  // re-open the tooltip at a broken location. The RAF-based nudge below
+  // adjusts the final position once the real height is known.
   const [geom, setGeom] = useState<PersistedGeometry>(() => {
     const saved = loadGeometry(tooltip.id);
-    if (saved) {
-      const clamped = clampToViewport(saved);
-      // If the clamp moved the tooltip, overwrite the stale stored value
-      // immediately so it doesn't keep re-opening off-screen.
-      if (clamped.x !== saved.x || clamped.y !== saved.y) {
-        saveGeometry(tooltip.id, clamped);
-      }
-      return clamped;
-    }
-    const w = Math.min(DEFAULT_W, window.innerWidth - 24);
+    const w = saved
+      ? Math.min(saved.w, window.innerWidth - 24)
+      : Math.min(DEFAULT_W, window.innerWidth - 24);
     return clampToViewport({ x: tooltip.x, y: tooltip.y, w, h: 0 });
   });
 
@@ -131,23 +126,38 @@ export function TextTooltip({ tooltip, onClose, onFocus, zIndex }: TextTooltipPr
     return () => clearTimeout(id);
   }, [geom, tooltip.id]);
 
-  // After the first render we know the real size — clamp based on the
-  // actual bounding rect. This runs for both fresh and saved geometries
-  // so a tooltip saved at y=-50 (e.g. from a smaller monitor) snaps
-  // back into the viewport immediately rather than being stuck off-screen.
+  // After the browser has laid out the tooltip we know the real height.
+  // Use requestAnimationFrame so the DOM measurement happens after paint,
+  // not just after React's render — this is the only reliable way to get
+  // the actual rendered height when h=0 (auto-sized).
+  // Priority: top edge > bottom edge. A tooltip that is too tall to fit
+  // is pinned at the top (header reachable) and scrolls internally.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const pad = 8;
-    let dx = 0, dy = 0;
-    if (rect.right > window.innerWidth - pad) dx = window.innerWidth - pad - rect.right;
-    if (rect.bottom > window.innerHeight - pad) dy = window.innerHeight - pad - rect.bottom;
-    if (rect.left + dx < pad) dx = pad - rect.left;
-    if (rect.top + dy < pad) dy = pad - rect.top;
-    if (dx || dy) {
-      setGeom((g) => ({ ...g, x: g.x + dx, y: g.y + dy }));
-    }
+    const raf = requestAnimationFrame(() => {
+      const rect = el.getBoundingClientRect();
+      const pad = 8;
+      let nx = geom.x;
+      let ny = geom.y;
+      // Right edge overflow → shift left
+      if (rect.right > window.innerWidth - pad) {
+        nx -= rect.right - (window.innerWidth - pad);
+      }
+      // Left edge overflow → shift right
+      if (rect.left < pad) nx = pad;
+      // Bottom edge overflow → shift up
+      if (rect.bottom > window.innerHeight - pad) {
+        ny -= rect.bottom - (window.innerHeight - pad);
+      }
+      // TOP EDGE: always clamp last so header is never hidden
+      if (ny < pad) ny = pad;
+      if (nx !== geom.x || ny !== geom.y) {
+        setGeom((g) => ({ ...g, x: nx, y: ny }));
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tooltip.id]);
 
   // Drag-to-move: pointer events on the header. We track from the

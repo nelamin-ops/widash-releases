@@ -63,6 +63,9 @@ class RmaTicket(BaseModel):
     #   active  → still serving load                  (red pill)
     #   unknown → no Coolan signal available          (grey pill)
     coolanReportingState: Optional[str] = None
+    # ISO timestamp of the last Status field change from CaseHistory.
+    # None when the history hasn't been loaded yet or no change exists.
+    statusChangedAt: Optional[datetime] = None
 
     @computed_field
     @property

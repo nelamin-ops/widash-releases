@@ -50,7 +50,7 @@ from .models import (
 # pass into SOQL all originate from authenticated SF responses today, but this
 # guard keeps the f-string interpolation safe if a future code path ever feeds
 # an unvalidated value into _query_history / _query_feed / _query_frankfurt_…
-_SF_ID_RE = re.compile(r"^[a-zA-Z0-9]{15,18}$")
+_SF_ID_RE = re.compile(r"^[a-zA-Z0-9]{15,20}$")
 
 
 def _safe_ids_clause(ids: list[str]) -> str:
@@ -643,8 +643,15 @@ class GusClient:
 
         asset_ids = list({r["assetId"] for r in rows if r.get("assetId")})
         case_ids = [r["id"] for r in rows]
-        asset_type_by_id = self._query_asset_types(asset_ids)
-        coolan_by_case, description_by_case = self._query_descriptions(case_ids)
+        # Run asset types, descriptions and status-change timestamps in parallel.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f_assets = ex.submit(self._query_asset_types, asset_ids)
+            f_desc = ex.submit(self._query_descriptions, case_ids)
+            f_status_ts = ex.submit(self._query_last_status_change, case_ids)
+            asset_type_by_id = f_assets.result()
+            coolan_by_case, description_by_case = f_desc.result()
+            status_changed_by_case = f_status_ts.result()
 
         # Resolve Coolan machines in **two** batched calls instead of N.
         # First pass: every ticket whose description carries a parseable
@@ -715,9 +722,44 @@ class GusClient:
                 description=description_by_case.get(r["id"], "") or "",
                 coolanLinks=coolan_by_case.get(r["id"], []),
                 coolanReportingState=coolan_state_by_case.get(r["id"]),
+                statusChangedAt=status_changed_by_case.get(r["id"]),
             )
             for r in rows
         ]
+
+    def _query_last_status_change(
+        self, case_ids: list[str],
+    ) -> dict[str, datetime]:
+        """Return {case_id: last_status_change_datetime} for each case.
+
+        Fetches only the most recent Status-field entry per case so the
+        result set stays small even for large buckets.
+        """
+        ids_clause = _safe_ids_clause(case_ids)
+        if not ids_clause:
+            return {}
+        soql = (
+            "SELECT CaseId, CreatedDate "
+            "FROM CaseHistory "
+            f"WHERE CaseId IN ({ids_clause}) "
+            "AND Field = 'Status' "
+            "ORDER BY CreatedDate DESC LIMIT 2000"
+        )
+        records = self._sf.query_all(soql)["records"]
+        result: dict[str, datetime] = {}
+        for rec in records:
+            cid = rec.get("CaseId") or ""
+            if cid in result:
+                continue  # already got the most recent one (ordered DESC)
+            raw = rec.get("CreatedDate") or ""
+            if raw:
+                try:
+                    result[cid] = datetime.fromisoformat(
+                        raw.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    pass
+        return result
 
     def _query_history(self, ticket_sf_ids: list[str]) -> list[dict]:
         ids_clause = _safe_ids_clause(ticket_sf_ids)

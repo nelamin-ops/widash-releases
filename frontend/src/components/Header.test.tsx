@@ -13,7 +13,7 @@ describe("Header", () => {
         onToggleLocation={() => {}}
       />,
     );
-    expect(screen.getByText("WiDash")).toBeInTheDocument();
+    expect(screen.getByAltText("WiDash")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /FRA1/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /FRA2/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /FRA3/ })).toBeInTheDocument();
