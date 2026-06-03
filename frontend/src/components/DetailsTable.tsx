@@ -78,6 +78,7 @@ export function DetailsTable({
 
   const [columnsOpen, setColumnsOpen] = useState(false);
   const columnsBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Per-list filter — case-insensitive substring on a single user-picked
   // column. Local state, resets when the panel is closed.
@@ -455,12 +456,25 @@ export function DetailsTable({
           <tbody>
             {displayed.map((ticket) => {
               const isNew = ticket.status === "New";
+              const isSelected = selectedId === ticket.id;
               return (
                 <tr
                   key={ticket.id}
-                  className={`divider-t align-top ${
-                    isNew ? "bg-emerald-500/10" : ""
+                  onClick={(e) => {
+                    const tag = (e.target as HTMLElement).closest("a, button");
+                    if (tag) return;
+                    setSelectedId(isSelected ? null : ticket.id);
+                  }}
+                  className={`divider-t align-top cursor-pointer ${
+                    isSelected
+                      ? "bg-sky-500/20 dark:bg-sky-400/15"
+                      : isNew
+                        ? "bg-emerald-500/10 hover:bg-emerald-500/20"
+                        : "hover:bg-white/5 dark:hover:bg-white/5"
                   }`}
+                  style={isSelected && statusColor
+                    ? { backgroundColor: `${statusColor}22` }
+                    : undefined}
                 >
                   {visibleColumns.map((id) => {
                     const col = DETAILS_COLUMN_INDEX[id];
