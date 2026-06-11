@@ -131,6 +131,9 @@ export interface CaseDetailResponse {
   caseId: string;
   caseNumber: string;
   assetId?: string | null;
+  /** Free-text vendor reference (e.g. "SR# 123, WO# 456"). Set only
+   *  when an external vendor is dispatched on the case. */
+  vendorCaseNumber?: string | null;
   sections: CaseDetailSection[];
 }
 

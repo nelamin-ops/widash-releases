@@ -113,6 +113,8 @@ const dict = {
     "chatter.replies": "Replies",
 
     "sheet.editStatus": "Change status",
+    "sheet.vendorCaseNumber": "Vendor Case Number",
+    "sheet.vendorCaseNumberHint": "An external vendor is dispatched on this case — escort required.",
     "sheet.pickParentFirst": "Pick the parent category first",
     "sheet.editSection": "Edit",
     "sheet.saveSection": "Review changes",
@@ -335,6 +337,8 @@ const dict = {
     "chatter.replies": "Antworten",
 
     "sheet.editStatus": "Status ändern",
+    "sheet.vendorCaseNumber": "Vendor Case Number",
+    "sheet.vendorCaseNumberHint": "Ein Vendor ist auf diesem Case eingeplant — Eskorte nötig.",
     "sheet.pickParentFirst": "Erst die übergeordnete Kategorie auswählen",
     "sheet.editSection": "Bearbeiten",
     "sheet.saveSection": "Änderungen prüfen",

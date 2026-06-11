@@ -1,0 +1,48 @@
+{
+  "history": {
+    "totalSize": 2,
+    "records": [
+      {
+        "Id": "h001",
+        "ParentId": "a0a000000000001",
+        "Field": "Status",
+        "OldValue": "New",
+        "NewValue": "In Progress",
+        "CreatedDate": "2026-05-18T14:32:00Z",
+        "CreatedBy": {"Username": "@nelamin"},
+        "Parent": {"Name": "W-12345", "Location__c": "FRA2"}
+      },
+      {
+        "Id": "h002",
+        "ParentId": "a0a000000000004",
+        "Field": "Status",
+        "OldValue": "Waiting",
+        "NewValue": "Escalated",
+        "CreatedDate": "2026-05-18T13:55:00Z",
+        "CreatedBy": {"Username": "@nelamin"},
+        "Parent": {"Name": "W-12347", "Location__c": "FRA1"}
+      }
+    ]
+  },
+  "feed": {
+    "totalSize": 2,
+    "records": [
+      {
+        "Id": "f001",
+        "ParentId": "a0a000000000002",
+        "Body": "Vendor RMA #ABC123 dispatched, ETA Friday.",
+        "CreatedDate": "2026-05-18T14:18:00Z",
+        "CreatedBy": {"Username": "@j.smith"},
+        "Parent": {"Name": "W-12340", "Location__c": "FRA1"}
+      },
+      {
+        "Id": "f002",
+        "ParentId": "a0a000000000005",
+        "Body": "Disk arrived on site, scheduling swap window.",
+        "CreatedDate": "2026-05-18T13:42:00Z",
+        "CreatedBy": {"Username": "@vendor"},
+        "Parent": {"Name": "W-12348", "Location__c": "FRA2"}
+      }
+    ]
+  }
+}

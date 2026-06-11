@@ -2,6 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import type { RmaTicket } from "../types";
 
 const STORAGE_KEY = "widash.caseSheets";
+// Global "preferred height" — once the user resizes any sheet, every
+// subsequent sheet (new or restored) opens at that height instead of
+// falling back to 50vh. Persisted so the preference survives reloads.
+const PREFERRED_HEIGHT_KEY = "widash.caseSheetHeight";
 const DEFAULT_HEIGHT_VH = 50;
 const MIN_HEIGHT_VH = 30;
 const MAX_HEIGHT_VH = 100;
@@ -55,6 +59,21 @@ function loadTabsPinned(): boolean {
   catch { return false; }
 }
 
+function loadPreferredHeight(): number {
+  try {
+    const raw = localStorage.getItem(PREFERRED_HEIGHT_KEY);
+    if (!raw) return DEFAULT_HEIGHT_VH;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_HEIGHT_VH;
+    return clampHeight(n);
+  } catch { return DEFAULT_HEIGHT_VH; }
+}
+
+function savePreferredHeight(vh: number): void {
+  try { localStorage.setItem(PREFERRED_HEIGHT_KEY, String(vh)); }
+  catch { /* ignore */ }
+}
+
 export function useCaseSheets() {
   const [sheets, setSheets] = useState<CaseSheet[]>(() => loadInitial());
   /** Global toggle — when true, the bottom tab bar is parked just above
@@ -85,17 +104,18 @@ export function useCaseSheets() {
       meta: { status?: string; statusColor?: string },
     ) => {
       setSheets((prev) => {
+        // Whoever becomes the active sheet adopts the preferred height —
+        // so a manual resize on case A carries over when the user clicks
+        // case B's pill instead of bouncing back to 50vh.
+        const preferred = loadPreferredHeight();
         const existing = prev.find((s) => s.id === ticket.id);
         if (existing) {
-          // Re-clicking on the same case re-maximizes its existing sheet
-          // and minimizes any other currently-maximized one.
           return prev.map((s) =>
             s.id === ticket.id
-              ? { ...s, minimized: false, ticket }
+              ? { ...s, minimized: false, ticket, heightVh: preferred }
               : { ...s, minimized: true },
           );
         }
-        // New case → minimize all existing maximized sheets, push new on top.
         const minimised = prev.map((s) => ({ ...s, minimized: true }));
         return [
           ...minimised,
@@ -106,7 +126,7 @@ export function useCaseSheets() {
             statusColor: meta.statusColor,
             ticket,
             minimized: false,
-            heightVh: DEFAULT_HEIGHT_VH,
+            heightVh: preferred,
           },
         ];
       });
@@ -125,19 +145,24 @@ export function useCaseSheets() {
   }, []);
 
   const restore = useCallback((id: string) => {
+    const preferred = loadPreferredHeight();
     setSheets((prev) =>
       prev.map((s) =>
         s.id === id
-          ? { ...s, minimized: false }
+          ? { ...s, minimized: false, heightVh: preferred }
           : { ...s, minimized: true },
       ),
     );
   }, []);
 
   const setHeight = useCallback((id: string, vh: number) => {
+    const clamped = clampHeight(vh);
+    // Persist as the new preferred height so subsequent sheet opens
+    // and pill switches inherit it instead of resetting to 50vh.
+    savePreferredHeight(clamped);
     setSheets((prev) =>
       prev.map((s) =>
-        s.id === id ? { ...s, heightVh: clampHeight(vh) } : s,
+        s.id === id ? { ...s, heightVh: clamped } : s,
       ),
     );
   }, []);

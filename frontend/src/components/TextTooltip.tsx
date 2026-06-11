@@ -238,6 +238,12 @@ export function TextTooltip({ tooltip, onClose, onFocus, zIndex }: TextTooltipPr
         zIndex,
         width: geom.w,
         height: geom.h > 0 ? geom.h : undefined,
+        // Auto-sized tooltips need an upper bound so the inner scroll
+        // container actually constrains — without this, long text just
+        // grows the box past the bottom of the viewport with no scroll.
+        // ``geom.y`` is already clamped to ``pad`` so this leaves another
+        // pad of breathing room at the bottom.
+        maxHeight: `calc(100vh - ${geom.y + 8}px)`,
         display: "flex",
         flexDirection: "column",
       }}

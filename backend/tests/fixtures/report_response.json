@@ -1,0 +1,67 @@
+{
+  "reportMetadata": {
+    "name": "Active RMA FRA1/2/3",
+    "id": "00OEE000001HkkD2AS"
+  },
+  "factMap": {
+    "T!T": {
+      "rows": [
+        {
+          "dataCells": [
+            {"value": "a0a000000000001", "label": "W-12345"},
+            {"value": "FRA2", "label": "FRA2"},
+            {"value": "P0", "label": "P0"},
+            {"value": "In Progress", "label": "In Progress"},
+            {"value": "Disk", "label": "Disk"},
+            {"value": "2026-05-01T08:00:00Z", "label": "5/1/2026"},
+            {"value": "@nelamin", "label": "@nelamin"}
+          ]
+        },
+        {
+          "dataCells": [
+            {"value": "a0a000000000002", "label": "W-12340"},
+            {"value": "FRA1", "label": "FRA1"},
+            {"value": "P1", "label": "P1"},
+            {"value": "In Progress", "label": "In Progress"},
+            {"value": "PSU", "label": "PSU"},
+            {"value": "2026-05-05T10:00:00Z", "label": "5/5/2026"},
+            {"value": "@j.smith", "label": "@j.smith"}
+          ]
+        },
+        {
+          "dataCells": [
+            {"value": "a0a000000000003", "label": "W-12346"},
+            {"value": "FRA3", "label": "FRA3"},
+            {"value": "P2", "label": "P2"},
+            {"value": "New", "label": "New"},
+            {"value": "RAM", "label": "RAM"},
+            {"value": "2026-05-15T12:00:00Z", "label": "5/15/2026"},
+            {"value": "@nelamin", "label": "@nelamin"}
+          ]
+        },
+        {
+          "dataCells": [
+            {"value": "a0a000000000004", "label": "W-12347"},
+            {"value": "FRA1", "label": "FRA1"},
+            {"value": "P3", "label": "P3"},
+            {"value": "Escalated", "label": "Escalated"},
+            {"value": "NIC", "label": "NIC"},
+            {"value": "2026-04-01T08:00:00Z", "label": "4/1/2026"},
+            {"value": "@vendor", "label": "@vendor"}
+          ]
+        },
+        {
+          "dataCells": [
+            {"value": "a0a000000000005", "label": "W-12348"},
+            {"value": "FRA2", "label": "FRA2"},
+            {"value": "P2", "label": "P2"},
+            {"value": "Waiting", "label": "Waiting"},
+            {"value": "Disk", "label": "Disk"},
+            {"value": "2026-05-10T14:00:00Z", "label": "5/10/2026"},
+            {"value": "@nelamin", "label": "@nelamin"}
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -541,6 +541,18 @@ export function CaseDetailSheet({
             style={{ background: accent }}
           />
           <h2 className="text-xl font-semibold font-mono">{ticket.name}</h2>
+          {detail?.vendorCaseNumber && (
+            <span
+              className="pill bg-amber-500/25 text-amber-700 dark:text-amber-200 text-xs flex items-center gap-1.5 whitespace-nowrap"
+              title={`${t("sheet.vendorCaseNumber")}: ${detail.vendorCaseNumber} — ${t("sheet.vendorCaseNumberHint")}`}
+            >
+              <span aria-hidden>🛠</span>
+              <span className="opacity-80 uppercase tracking-wide text-[10px]">
+                {t("sheet.vendorCaseNumber")}
+              </span>
+              <span className="font-mono">{detail.vendorCaseNumber}</span>
+            </span>
+          )}
           {ticket.assetLocationPath && (
             <span
               className="text-xl font-semibold font-mono opacity-70 truncate"

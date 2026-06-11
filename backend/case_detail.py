@@ -295,6 +295,38 @@ ASSET_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 
+# Cache the resolved Vendor-Case-Number API name per session — describe
+# is already cached, but pulling the label match each request churns a
+# loop over ~250 fields. Set to None when the field doesn't exist on the
+# org so we don't re-search.
+_vendor_case_number_apiname: Optional[str] = None
+_vendor_case_number_resolved = False
+_vendor_case_number_lock = Lock()
+
+
+def _resolve_vendor_case_number_field(
+    case_meta: dict[str, dict[str, Any]],
+) -> Optional[str]:
+    """Return the API name of the case field labelled "Vendor Case Number".
+
+    GUS uses a custom field whose API name varies across orgs (e.g.
+    ``SM_Vendor_Case_Number__c`` or similar). Looking it up by the visible
+    label keeps us decoupled from the exact API name.
+    """
+    global _vendor_case_number_apiname, _vendor_case_number_resolved
+    with _vendor_case_number_lock:
+        if _vendor_case_number_resolved:
+            return _vendor_case_number_apiname
+        for name, meta in case_meta.items():
+            label = (meta.get("label") or "").strip().lower()
+            if label == "vendor case number":
+                _vendor_case_number_apiname = name
+                _vendor_case_number_resolved = True
+                return name
+        _vendor_case_number_resolved = True
+        return None
+
+
 def _all_field_names(groups: list[tuple[str, list[tuple[str, str]]]]) -> list[str]:
     names: list[str] = []
     for _, fields in groups:
@@ -441,9 +473,13 @@ def get_case_detail(
     the AssetId lookup and go straight to that record.
     """
     case_meta = _describe_fields_by_name(sf, "Case")
+    vendor_field = _resolve_vendor_case_number_field(case_meta)
+    extra_fields = ["AssetId", "RecordTypeId"]
+    if vendor_field:
+        extra_fields.append(vendor_field)
     case_fields = _expand_select(
         "Case",
-        _all_field_names(CASE_GROUPS) + ["AssetId", "RecordTypeId"],
+        _all_field_names(CASE_GROUPS) + extra_fields,
         case_meta,
     )
     case_select = ",".join(case_fields)
@@ -508,9 +544,16 @@ def get_case_detail(
                 instance_url=instance_url,
             ))
 
+    vendor_case_number: Optional[str] = None
+    if vendor_field:
+        raw = case_record.get(vendor_field)
+        if raw is not None and str(raw).strip():
+            vendor_case_number = str(raw).strip()
+
     return CaseDetailResponse(
         caseId=case_id,
         caseNumber=str(case_record.get("CaseNumber") or ""),
         assetId=asset_id or None,
+        vendorCaseNumber=vendor_case_number,
         sections=sections,
     )

@@ -187,4 +187,9 @@ class CaseDetailResponse(BaseModel):
     caseId: str
     caseNumber: str
     assetId: Optional[str] = None
+    # When a Vendor is dispatched on the case, GUS surfaces a free-text
+    # "Vendor Case Number" (e.g. ``SR# 123, WO# 456``). Surfacing it in
+    # the sheet header tells the engineer at a glance that an external
+    # tech needs escorting.
+    vendorCaseNumber: Optional[str] = None
     sections: list[CaseDetailSection]
