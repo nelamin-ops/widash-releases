@@ -5,6 +5,7 @@ import { useFontSize } from "../hooks/useFontSize";
 import { IconButton, IconMoon, IconRefresh, IconSun } from "./IconButton";
 import { LanguageToggle } from "./LanguageToggle";
 import { CoolanStatusPill } from "./CoolanStatusPill";
+import { MomStatusPill } from "./MomStatusPill";
 import { WriteModePill } from "./WriteModePill";
 
 // Default site list — used until the backend tells us which sites the
@@ -109,6 +110,7 @@ export function Header({
       <div className="flex items-center gap-2">
         <WriteModePill />
         <CoolanStatusPill />
+        <MomStatusPill />
         <LanguageToggle
           lang={lang}
           setLang={setLang}

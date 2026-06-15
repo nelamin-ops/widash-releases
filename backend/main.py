@@ -12,7 +12,10 @@ from simple_salesforce.exceptions import (
 )
 
 logger = logging.getLogger("widash")
-from . import case_detail, coolan_auth, coolan_browser, coolan_client, sf_session
+from . import (
+    case_detail, coolan_auth, coolan_browser, coolan_client,
+    mom_auth, mom_client, sf_session,
+)
 from . import patchplan as patchplan_mod
 from . import update_check
 from .cache import TtlCache
@@ -675,6 +678,241 @@ def coolan_auth_clear():
     coolan_auth.clear()
     _cache.clear()
     return {"status": "cleared"}
+
+
+# ---- mom.dmz / Argus temperature monitoring -------------------------------
+
+class MomAuthIn(BaseModel):
+    cookie: str
+    note: str = ""
+
+
+# Restrict the ?site= param to codes the active report actually covers,
+# so a logged-in user can't pivot the mom.dmz scope to a different region
+# than the report they're working in.
+def _validate_site_for_clients(
+    site: str, clients: list[GusClient],
+) -> str | None:
+    site_norm = (site or "").strip().upper()
+    if not re.match(r"^[A-Z]{2,4}\d$", site_norm):
+        return None
+    allowed: set[str] = set()
+    for c in clients:
+        try:
+            allowed.update(c._report_site_codes())
+        except Exception:
+            logger.exception("failed to resolve site codes for mom-temps")
+    return site_norm if site_norm in allowed else None
+
+
+@app.get("/api/mom/status")
+def mom_status():
+    return mom_client.status()
+
+
+@app.post("/api/mom/auth")
+def mom_auth_set(payload: MomAuthIn):
+    if not payload.cookie.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_auth", "message": "Provide a cookie."},
+        )
+    mom_auth.save(payload.cookie, payload.note)
+    mom_client.record_error(None)
+    return mom_client.status()
+
+
+@app.delete("/api/mom/auth")
+def mom_auth_clear():
+    mom_auth.clear()
+    mom_client.record_error(None)
+    return {"status": "cleared"}
+
+
+@app.get("/api/temps/overview")
+def temps_overview(
+    site: str = Query(..., description="Site code, e.g. FRA3"),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    site_ok = _validate_site_for_clients(site, clients)
+    if not site_ok:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_site",
+                     "message": "Site must match the active report scope."},
+        )
+    cache_key = f"mom:overview:{site_ok}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        rooms = mom_client.fetch_overview(site=site_ok)
+    except mom_client.MomAuthError as e:
+        mom_client.record_error(str(e))
+        return JSONResponse(
+            status_code=401,
+            content={"error": "mom_auth_expired",
+                     "message": "Refresh the mom.dmz cookie."},
+        )
+    except mom_client.MomError as e:
+        mom_client.record_error(str(e))
+        logger.exception("mom overview failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "mom_unavailable",
+                     "message": "mom.dmz request failed."},
+        )
+    mom_client.record_error(None)
+    payload = {"site": site_ok, "rooms": rooms}
+    # Short TTL — the overview tile colours move with rack temps; 30s
+    # matches the dashboard's existing polling cadence so we don't
+    # hammer mom.dmz when the overlay is open.
+    _cache.set(cache_key, payload, ttl_seconds=30)
+    return payload
+
+
+# Rack identifier format. Accepts either the long asset-location name
+# ("Frankfurt - FRA3 - 14.4 - 424 - G35") or just the bare rack label
+# ("G35", "A01"). Letters, digits, dot, dash, space — nothing else.
+_RACK_NAME_RE = re.compile(r"^[A-Za-z0-9 .\-]{2,80}$")
+
+
+@app.get("/api/temps/rack")
+def temps_rack(
+    site: str = Query(...),
+    rack: str = Query(...),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    site_ok = _validate_site_for_clients(site, clients)
+    if not site_ok:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_site"},
+        )
+    if not _RACK_NAME_RE.match(rack):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_rack"},
+        )
+    cache_key = f"mom:rack:{site_ok}:{rack}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        devices = mom_client.fetch_rack_devices(site=site_ok, rack=rack)
+    except mom_client.MomAuthError:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "mom_auth_expired"},
+        )
+    except mom_client.MomError as e:
+        logger.exception("mom rack fetch failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "mom_unavailable"},
+        )
+    payload = {"site": site_ok, "rack": rack, "devices": devices}
+    _cache.set(cache_key, payload, ttl_seconds=30)
+    return payload
+
+
+# Device names look like "leaf3-ncg6-fra3", "sw2c-pod320-ncg28-fra3" etc.
+# Lower-case letters / digits / hyphen, must end with the site code.
+_DEVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}-[a-z]{3}\d$")
+
+
+@app.get("/api/temps/device/history")
+def temps_device_history(
+    site: str = Query(...),
+    device: str = Query(...),
+    timeframe: str = Query("1h"),
+    agg: str = Query("max"),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    site_ok = _validate_site_for_clients(site, clients)
+    if not site_ok:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_site"},
+        )
+    if not _DEVICE_NAME_RE.match(device):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_device"},
+        )
+    if timeframe not in mom_client.TIMEFRAMES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_timeframe"},
+        )
+    if agg not in mom_client.AGGREGATIONS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_agg"},
+        )
+    cache_key = f"mom:device:{site_ok}:{device}:{timeframe}:{agg}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        # mom.dmz returns all devices for a site in one Argus call; we
+        # filter to the requested device server-side so the frontend
+        # only sees what it asked for.
+        all_series = mom_client.fetch_switch_temperatures(
+            site=site_ok, timeframe=timeframe, agg=agg,
+        )
+    except mom_client.MomAuthError:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "mom_auth_expired"},
+        )
+    except mom_client.MomError as e:
+        logger.exception("mom device history failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "mom_unavailable"},
+        )
+    matching = [s for s in all_series if s.get("device") == device]
+    payload = {
+        "site": site_ok,
+        "device": device,
+        "timeframe": timeframe,
+        "agg": agg,
+        "series": matching,
+    }
+    # Detail charts are user-driven (click → fetch), 30s cache prevents
+    # double-fetches when the user toggles between sensors.
+    _cache.set(cache_key, payload, ttl_seconds=30)
+    return payload
+
+
+_COOLAN_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+@app.get("/api/temps/coolan/snapshot")
+def temps_coolan_snapshot(uuid: str = Query(...)):
+    if not _COOLAN_UUID_RE.match(uuid):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_uuid"},
+        )
+    cache_key = f"coolan:snapshot:{uuid}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    snap = coolan_client.get_machine_temp_snapshot(uuid)
+    if not snap:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found"},
+        )
+    # Coolan refreshes hourly; 30s cache here is enough to absorb
+    # double-clicks without making the user wait on a second open.
+    _cache.set(cache_key, snap, ttl_seconds=30)
+    return snap
 
 
 @app.get("/api/case/{case_id}", response_model=CaseDetailResponse)

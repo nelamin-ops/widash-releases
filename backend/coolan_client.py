@@ -565,6 +565,227 @@ def get_components(machine_uuid: str, limit: int = 200) -> list[CoolanComponent]
     return out
 
 
+class CoolanRackServer(TypedDict, total=False):
+    uuid: str
+    hostname: str
+    u_pos: str
+    # Inlet / Exhaust / max(CPU) in °C. None when the probe is missing
+    # or its parsed_value can't be coerced to float.
+    tempInlet: Optional[float]
+    tempExhaust: Optional[float]
+    tempCpuMax: Optional[float]
+    last_report_time: Optional[str]
+    reporting_state: Optional[str]
+
+
+# 30-minute cache. Coolan refreshes server data hourly, so the rack-server
+# list barely moves and a cold lookup costs one Hasura query — keeping the
+# UI snappy when the user clicks back and forth between racks.
+_rack_servers_cache: dict[tuple[str, str, str], tuple[float, list["CoolanRackServer"]]] = {}
+_RACK_SERVERS_TTL_S = 1800.0
+
+# Allow-list shapes that mom.dmz produces. Coolan's RACK_TECH_ASSET
+# attributes carry these as plain strings; we never interpolate them
+# into the GraphQL string (the query uses a single parameterised
+# `$attrs: jsonb` variable), but the regex defends against weird inputs
+# leaking into the cache key or telemetry.
+_RACK_FACILITY_RE = re.compile(r"^[A-Z]{2,4}\d$")
+_RACK_ROOM_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
+_RACK_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
+
+
+def get_rack_servers(
+    *, facility: str, room: str, rack: str,
+) -> list["CoolanRackServer"]:
+    """Return Coolan-known servers in the given rack with temperature probes.
+
+    Filters Coolan's machines by their ``RACK_TECH_ASSET`` external-record
+    attributes ``{Facility, Room, RackNumber}``. Each result carries the
+    server's U-position plus Inlet / Exhaust / max-CPU temperatures —
+    Coolan has no machine-level aggregate, so we read the individual
+    ``TEMPERATURE_PROBE`` components and pick known display names.
+    """
+    import time as _time
+    f = (facility or "").strip().upper()
+    r = (room or "").strip()
+    k = (rack or "").strip().upper()
+    if not (_RACK_FACILITY_RE.match(f)
+            and _RACK_ROOM_RE.match(r)
+            and _RACK_LABEL_RE.match(k)):
+        return []
+
+    now = _time.time()
+    cached = _rack_servers_cache.get((f, r, k))
+    if cached and now - cached[0] < _RACK_SERVERS_TTL_S:
+        return cached[1]
+
+    query = """
+      query Q($attrs: jsonb!) {
+        machines(
+          where: {
+            machine_external_records: {
+              external_record: {
+                record_type: {_eq: "RACK_TECH_ASSET"},
+                attributes: {_contains: $attrs}
+              }
+            }
+          }
+          limit: 200
+        ) {
+          id hostname reporting_state last_report_time
+          machine_attributes(
+            where: {name: {_eq: "rackUPositionFromBottom"}}
+            limit: 1
+          ) { name parsed_value }
+          components(
+            where: {
+              asset_type: {_eq: "TEMPERATURE_PROBE"},
+              reporting_state: {_eq: "ACTIVE"}
+            }
+            limit: 30
+          ) {
+            display_name
+            component_attributes(limit: 20) { name parsed_value }
+          }
+        }
+      }
+    """
+    try:
+        data = graphql(
+            query,
+            {"attrs": {"Facility": f, "Room": r, "RackNumber": k}},
+        )
+    except CoolanError:
+        return []
+
+    out: list[CoolanRackServer] = []
+    for m in data.get("machines") or []:
+        u_pos = ""
+        for ma in m.get("machine_attributes") or []:
+            if ma.get("name") == "rackUPositionFromBottom":
+                u_pos = str(ma.get("parsed_value") or "").strip()
+                break
+        inlet: Optional[float] = None
+        exhaust: Optional[float] = None
+        cpu_max: Optional[float] = None
+        for comp in m.get("components") or []:
+            display = (comp.get("display_name") or "").strip()
+            value: Optional[float] = None
+            # Probes carry exactly one *Temperature attribute, e.g.
+            # "inletTemperature" / "cpu1Temperature" — find it and parse.
+            for ca in comp.get("component_attributes") or []:
+                name = ca.get("name") or ""
+                if name.endswith("Temperature"):
+                    try:
+                        value = float(ca.get("parsed_value") or "")
+                    except (TypeError, ValueError):
+                        value = None
+                    break
+            if value is None:
+                continue
+            if display == "Inlet Temp":
+                inlet = value
+            elif display == "Exhaust Temp":
+                exhaust = value
+            elif display.startswith("CPU "):
+                if cpu_max is None or value > cpu_max:
+                    cpu_max = value
+        out.append({
+            "uuid": m.get("id") or "",
+            "hostname": m.get("hostname") or "",
+            "u_pos": u_pos,
+            "tempInlet": inlet,
+            "tempExhaust": exhaust,
+            "tempCpuMax": cpu_max,
+            "last_report_time": m.get("last_report_time"),
+            "reporting_state": m.get("reporting_state"),
+        })
+
+    _rack_servers_cache[(f, r, k)] = (now, out)
+    return out
+
+
+class CoolanTempProbe(TypedDict, total=False):
+    name: str           # "Inlet Temp", "CPU 1 Temp", "Exhaust Temp", …
+    tempC: Optional[float]
+    last_report_time: Optional[str]
+
+
+class CoolanTempSnapshot(TypedDict):
+    uuid: str
+    hostname: str
+    probes: list[CoolanTempProbe]
+    last_report_time: Optional[str]
+    machine_url: str
+
+
+def get_machine_temp_snapshot(machine_uuid: str) -> Optional[CoolanTempSnapshot]:
+    """Return all active TEMPERATURE_PROBE readings for one Coolan machine.
+
+    Used by the rack overlay's per-server detail panel. Coolan has no
+    historical time-series for sensor data, so we surface the snapshot
+    instead of a chart.
+    """
+    if not _BARE_UUID_RE.match(machine_uuid or ""):
+        return None
+    query = """
+      query Q($id: uuid!) {
+        machines_by_pk(id: $id) {
+          id hostname last_report_time
+          components(
+            where: {
+              asset_type: {_eq: "TEMPERATURE_PROBE"},
+              reporting_state: {_eq: "ACTIVE"}
+            }
+            limit: 30
+          ) {
+            display_name last_report_time
+            component_attributes(limit: 20) { name parsed_value }
+          }
+        }
+      }
+    """
+    try:
+        data = graphql(query, {"id": machine_uuid})
+    except CoolanError:
+        return None
+    m = data.get("machines_by_pk")
+    if not m:
+        return None
+    probes: list[CoolanTempProbe] = []
+    for comp in m.get("components") or []:
+        value: Optional[float] = None
+        for ca in comp.get("component_attributes") or []:
+            if (ca.get("name") or "").endswith("Temperature"):
+                try:
+                    value = float(ca.get("parsed_value") or "")
+                except (TypeError, ValueError):
+                    value = None
+                break
+        probes.append({
+            "name": (comp.get("display_name") or "").strip(),
+            "tempC": value,
+            "last_report_time": comp.get("last_report_time"),
+        })
+    # Sort with Inlet/Exhaust first (the "rack air" pair), then CPUs by
+    # numeric suffix, then everything else alphabetically — mirrors the
+    # order an engineer scans them in.
+    def _key(p: CoolanTempProbe) -> tuple[int, str]:
+        n = p.get("name") or ""
+        if n == "Inlet Temp": return (0, n)
+        if n == "Exhaust Temp": return (1, n)
+        if n.startswith("CPU "): return (2, n)
+        return (3, n)
+    probes.sort(key=_key)
+    return {
+        "uuid": m.get("id") or machine_uuid,
+        "hostname": m.get("hostname") or "",
+        "probes": probes,
+        "last_report_time": m.get("last_report_time"),
+        "machine_url": f"{COOLAN_BASE}/app/machine/{m.get('id') or machine_uuid}/summary",
+    }
+
+
 def synthesize_links(machine_uuid: str) -> list[dict[str, str]]:
     """Build the standard three Coolan-tab links for a machine UUID.
 

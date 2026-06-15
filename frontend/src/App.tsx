@@ -12,6 +12,7 @@ import { CaseTabsBar } from "./components/CaseTabsBar";
 import { formatAssetPath } from "./assetPath";
 import { RegionSettingsModal } from "./components/RegionSettingsModal";
 import { PatchplanExplorer } from "./components/PatchplanExplorer";
+import { TempsExplorer } from "./components/TempsExplorer";
 
 // CaseDetailSheet pulls in chatter, edit modal, lookup combobox, and
 // the Coolan components panel — all of which the dashboard doesn't
@@ -472,6 +473,7 @@ export default function App() {
       />
 
       <PatchplanExplorer />
+      <TempsExplorer sites={[...(active?.sites ?? ALL_LOCATIONS)]} />
     </div>
   );
 }

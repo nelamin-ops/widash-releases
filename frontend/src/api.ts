@@ -380,3 +380,105 @@ export interface UpdateInfo {
 export function fetchUpdateInfo(): Promise<UpdateInfo> {
   return fetch("/api/update-info").then(handle<UpdateInfo>);
 }
+
+// --- mom.dmz / Argus temperature monitoring -------------------------------
+
+export interface TempsRack {
+  fullValue: string;
+  label: string;
+  room: string;
+  cage: string;
+  tempC: number | null;
+  color: string;
+}
+
+export interface TempsRoom {
+  name: string;
+  racks: TempsRack[];
+}
+
+export interface TempsOverviewResponse {
+  site: string;
+  rooms: TempsRoom[];
+}
+
+export interface TempsDevice {
+  device: string;
+  label: string;
+  pos: string;
+  tempC: number | null;
+  color: string;
+  /** "mom" = network switch via mom.dmz/Argus, "coolan" = server via Coolan. */
+  source: "mom" | "coolan";
+  /** Coolan-only: individual probe values (Inlet / Exhaust / max(CPU)).
+   *  Coolan has no machine-level aggregate — the breakdown is what the
+   *  engineer cares about, so we surface all three. */
+  tempInlet?: number | null;
+  tempExhaust?: number | null;
+  tempCpuMax?: number | null;
+  /** Coolan-only: machine UUID for the snapshot detail panel. */
+  coolanUuid?: string;
+}
+
+export interface CoolanTempProbe {
+  name: string;
+  tempC: number | null;
+  last_report_time: string | null;
+}
+
+export interface CoolanSnapshotResponse {
+  uuid: string;
+  hostname: string;
+  probes: CoolanTempProbe[];
+  last_report_time: string | null;
+  machine_url: string;
+}
+
+export function fetchCoolanSnapshot(uuid: string): Promise<CoolanSnapshotResponse> {
+  return apiFetch(`/api/temps/coolan/snapshot?uuid=${encodeURIComponent(uuid)}`)
+    .then(handle<CoolanSnapshotResponse>);
+}
+
+export interface TempsRackResponse {
+  site: string;
+  rack: string;
+  devices: TempsDevice[];
+}
+
+export interface TempsSeries {
+  target: string;
+  device: string;
+  sensor: string;
+  /** Argus returns each point as [value, unix_ts_seconds]. */
+  datapoints: [number, number][];
+}
+
+export interface TempsHistoryResponse {
+  site: string;
+  device: string;
+  timeframe: string;
+  agg: string;
+  series: TempsSeries[];
+}
+
+export function fetchTempsOverview(site: string): Promise<TempsOverviewResponse> {
+  return apiFetch(`/api/temps/overview?site=${encodeURIComponent(site)}`)
+    .then(handle<TempsOverviewResponse>);
+}
+
+export function fetchTempsRack(site: string, rack: string): Promise<TempsRackResponse> {
+  const params = new URLSearchParams({ site, rack });
+  return apiFetch(`/api/temps/rack?${params.toString()}`)
+    .then(handle<TempsRackResponse>);
+}
+
+export function fetchTempsHistory(args: {
+  site: string;
+  device: string;
+  timeframe: string;
+  agg: string;
+}): Promise<TempsHistoryResponse> {
+  const params = new URLSearchParams(args);
+  return apiFetch(`/api/temps/device/history?${params.toString()}`)
+    .then(handle<TempsHistoryResponse>);
+}
