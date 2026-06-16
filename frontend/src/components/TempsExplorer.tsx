@@ -37,9 +37,12 @@ interface DetailContext {
  *  the same Tailwind palette so the dashboard stays visually coherent. */
 function tempBadgeClass(tempC: number | null): string {
   if (tempC == null) return "surface-2";
-  if (tempC < 24) return "bg-emerald-500/25 text-emerald-700 dark:text-emerald-200";
-  if (tempC < 28) return "bg-lime-500/25 text-lime-800 dark:text-lime-200";
-  if (tempC < 32) return "bg-amber-500/30 text-amber-800 dark:text-amber-100";
+  // Thresholds mirror mom.dmz / backend _temp_color: green up to 27°,
+  // yellow at 28°, then progressively redder from 29° on.
+  if (tempC < 28) return "bg-emerald-500/25 text-emerald-700 dark:text-emerald-200";
+  if (tempC < 29) return "bg-yellow-500/30 text-yellow-800 dark:text-yellow-100";
+  if (tempC < 30) return "bg-amber-500/30 text-amber-800 dark:text-amber-100";
+  if (tempC < 32) return "bg-orange-500/30 text-orange-800 dark:text-orange-100";
   return "bg-rose-500/30 text-rose-800 dark:text-rose-100";
 }
 

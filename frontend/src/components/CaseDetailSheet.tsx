@@ -900,11 +900,25 @@ function SheetSectionView({
       </header>
       {!effectiveCollapsed && (
       <div className="px-4 py-4 space-y-5">
-        {section.groups.map((group) => (
-          <div key={group.title}>
-            <h4 className="text-xs uppercase tracking-wider font-semibold opacity-70 mb-2 pb-1 border-b border-soft">
-              {group.title}
-            </h4>
+        {section.groups.map((group) => {
+          const groupHasEditable = group.fields.some((f) => f.editable);
+          return (
+          <div key={group.title} className="group/grp">
+            <div className="flex items-center gap-2 mb-2 pb-1 border-b border-soft">
+              <h4 className="text-xs uppercase tracking-wider font-semibold opacity-70 flex-1">
+                {group.title}
+              </h4>
+              {hasEditableField && groupHasEditable && !editing && (
+                <button
+                  type="button"
+                  onClick={onEdit}
+                  title={t("sheet.editSection")}
+                  className="pill surface-1 surface-1-hover text-[10px] flex items-center gap-1 opacity-0 group-hover/grp:opacity-100 focus:opacity-100 transition-opacity"
+                >
+                  <span aria-hidden>✎</span>
+                </button>
+              )}
+            </div>
             <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2.5 text-sm">
               {group.fields.map((field) => (
                 <FieldView
@@ -927,7 +941,8 @@ function SheetSectionView({
               ))}
             </dl>
           </div>
-        ))}
+          );
+        })}
         {editing && (
           <div className="flex justify-end gap-2 pt-2 border-t border-soft">
             <button
@@ -1015,7 +1030,7 @@ function FieldView({
       <dt className="text-[11px] uppercase tracking-wide opacity-60 mb-0.5">
         {field.label}
       </dt>
-      <dd className={`break-words ${field.mono ? "font-mono text-xs" : ""}`}>
+      <dd className={`break-words ${field.mono ? "font-mono text-xs" : ""} ${field.type === "textarea" && !editing ? "whitespace-pre-wrap" : ""}`}>
         {editing && field.editable ? (
           <FieldInput
             field={field}

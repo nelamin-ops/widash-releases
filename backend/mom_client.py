@@ -72,6 +72,15 @@ SWITCH_SENSORS: tuple[tuple[str, str], ...] = (
 )
 _SENSOR_SUFFIXES = {label: suffix for label, suffix in SWITCH_SENSORS}
 
+# Sensor groups used by the overview / rack-device list. Per device
+# we compute the max within each side, then take the **min** between
+# Front and Back — matches the original mom.dmz display, which
+# surfaces the cooler of the two sides per switch. The detail chart
+# still exposes all sensors individually via its dropdown.
+_FRONT_SENSORS: tuple[str, ...] = ("Front", "Front-Left D1", "Front-Right D2")
+_BACK_SENSORS:  tuple[str, ...] = ("Back", "Back D3")
+_OVERVIEW_SENSORS: tuple[str, ...] = _FRONT_SENSORS + _BACK_SENSORS
+
 # Timeframes the UI exposes. Keys are the dropdown labels, values are
 # Argus shorthand. Anything outside this set is rejected.
 TIMEFRAMES: dict[str, str] = {
@@ -302,20 +311,38 @@ def _argus_query(expressions: list[str]) -> list[dict[str, Any]]:
     return payload.get("data") or []
 
 
+# Some grok-device hits put the location under top-level
+# ``asset-location``; others (mlo*, certain ibx switches) only carry it
+# under ``asset.value.asset_location`` with ``rackupos_number`` one level
+# above. Without this fallback those devices are dropped from the
+# overview entirely — which is what hid e.g. Frankfurt 424/F15.
+def _extract_location(src: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Return (location_dict, rackupos_number) for one ES hit."""
+    top = src.get("asset-location") or {}
+    if top.get("facility") and top.get("rack_number") and top.get("cage_room"):
+        return top, str(top.get("rackupos_number") or "").strip()
+    nested_root = (src.get("asset") or {}).get("value") or {}
+    nested_loc = nested_root.get("asset_location") or {}
+    if nested_loc:
+        return nested_loc, str(nested_root.get("rackupos_number") or "").strip()
+    return top, str(top.get("rackupos_number") or "").strip()
+
+
 # --- Colour mapping ---------------------------------------------------------
 
 # mom.dmz uses a green-yellow-red ramp; we match it so the rack tiles
-# look familiar.
+# look familiar. Thresholds mirror the original system: green up to
+# 27°C, yellow at 28°, then it gets progressively redder from 29° on.
 def _temp_color(temp_c: Optional[float]) -> str:
     if temp_c is None:
         return "rgb(120, 120, 120)"
-    if temp_c < 22:
+    if temp_c < 28:
         return "rgb(34, 197, 94)"   # green
-    if temp_c < 26:
-        return "rgb(132, 204, 22)"  # lime
+    if temp_c < 29:
+        return "rgb(234, 179, 8)"   # yellow
     if temp_c < 30:
-        return "rgb(234, 179, 8)"   # amber
-    if temp_c < 34:
+        return "rgb(245, 158, 11)"  # amber
+    if temp_c < 32:
         return "rgb(249, 115, 22)"  # orange
     return "rgb(239, 68, 68)"       # red
 
@@ -323,19 +350,31 @@ def _temp_color(temp_c: Optional[float]) -> str:
 # --- Public API -------------------------------------------------------------
 
 def _device_temps(*, site: str) -> dict[str, float]:
-    """Return ``{device: max_temp_across_sensors}`` for the given site,
-    using a short Argus window. Used to colour the rack overview."""
-    sensors = [label for label, _ in SWITCH_SENSORS]
+    """Return ``{device: temp}`` for the given site using a short
+    Argus window. Used to colour the rack overview and rack-device
+    list.
+
+    Per device we take the max within each side (Front / Back), then
+    pick the **min** between sides — same as mom.dmz, which surfaces
+    the cooler side per switch. If only one side reports, we use that
+    one rather than dropping the device entirely.
+    """
     expressions = [
         _build_expression(site=site, sensor=s, timeframe="30m", agg="max")
-        for s in sensors
+        for s in _OVERVIEW_SENSORS
     ]
     raw = _argus_query(expressions)
-    out: dict[str, float] = {}
+    front_set = set(_FRONT_SENSORS)
+    back_set = set(_BACK_SENSORS)
+    front_max: dict[str, float] = {}
+    back_max: dict[str, float] = {}
     for item in raw:
         target = item.get("target") or ""
         device = (item.get("tags") or {}).get("device") or _extract_device(target)
         if not device:
+            continue
+        sensor = _extract_sensor(target)
+        if not sensor:
             continue
         datapoints = item.get("datapoints") or []
         if not datapoints:
@@ -346,9 +385,24 @@ def _device_temps(*, site: str) -> dict[str, float]:
             value = float(last[0])
         except (TypeError, ValueError):
             continue
-        prev = out.get(device)
-        if prev is None or value > prev:
-            out[device] = value
+        if sensor in front_set:
+            prev = front_max.get(device)
+            if prev is None or value > prev:
+                front_max[device] = value
+        elif sensor in back_set:
+            prev = back_max.get(device)
+            if prev is None or value > prev:
+                back_max[device] = value
+    out: dict[str, float] = {}
+    for device in front_max.keys() | back_max.keys():
+        f = front_max.get(device)
+        b = back_max.get(device)
+        if f is not None and b is not None:
+            out[device] = min(f, b)
+        elif f is not None:
+            out[device] = f
+        elif b is not None:
+            out[device] = b
     return out
 
 
@@ -357,11 +411,11 @@ def fetch_overview(*, site: str) -> list[Room]:
 
     Combines:
       * Elasticsearch ``grok-device`` (which device sits in which rack/room)
-      * Argus 30-minute max temperature per device
+      * Argus 30-minute temperature per device — see ``_device_temps``
+        for how Front / Back sensors are combined
 
-    Each rack's ``tempC`` is the **max** temperature across all switches
-    in it, so a single hot device colours the whole tile — matching the
-    behaviour of mom.dmz.
+    Each rack's ``tempC`` is the max across all switches in it, so a
+    single hot device colours the whole tile — matching mom.dmz.
     """
     if site not in _SITE_MAP:
         raise MomError(f"unsupported site: {site!r}")
@@ -381,7 +435,7 @@ def fetch_overview(*, site: str) -> list[Room]:
     rack_meta: dict[tuple[str, str], dict[str, Any]] = {}
     skipped = 0
     for src in sources:
-        loc = src.get("asset-location") or {}
+        loc, pos = _extract_location(src)
         facility = (loc.get("facility") or "").upper()
         if facility != site.upper():
             skipped += 1
@@ -396,7 +450,7 @@ def fetch_overview(*, site: str) -> list[Room]:
         full_value = loc.get("name") or ""
         racks_by_room.setdefault(room, {}).setdefault(rack_label, []).append({
             "device": device,
-            "pos": str(loc.get("rackupos_number") or "").strip(),
+            "pos": pos,
         })
         meta = rack_meta.setdefault((room, rack_label), {
             "fullValue": full_value,
@@ -470,7 +524,7 @@ def fetch_rack_devices(*, site: str, rack: str) -> list[Device]:
     room_label = ""
     rack_label = ""
     for src in sources:
-        loc = src.get("asset-location") or {}
+        loc, pos = _extract_location(src)
         facility = (loc.get("facility") or "").upper()
         if facility != site.upper():
             continue
@@ -493,7 +547,7 @@ def fetch_rack_devices(*, site: str, rack: str) -> list[Device]:
         devices.append({
             "device": device,
             "label": device,
-            "pos": str(loc.get("rackupos_number") or "").strip(),
+            "pos": pos,
             "tempC": round(temp, 1) if temp is not None else None,
             "color": _temp_color(temp),
             "source": "mom",
@@ -517,12 +571,11 @@ def fetch_rack_devices(*, site: str, rack: str) -> list[Device]:
             host = (s.get("hostname") or "").strip()
             if not host:
                 continue
-            # Colour anchor: Inlet temperature, because the green→red
-            # ramp is calibrated for rack-air temperatures (matches the
-            # mom.dmz switch front sensors). CPU/exhaust are always
-            # warmer than inlet by design and would paint every Coolan
-            # row red. Fall back through exhaust → cpu only if inlet is
-            # missing, so the row is at least coloured something.
+            # Colour anchor: Inlet temperature. The mom.dmz switches
+            # in this view show min(Front, Back) per device, which on
+            # most racks tracks intake air; Inlet is the equivalent
+            # for a server. Fall back through exhaust → cpu only if
+            # inlet is missing.
             anchor = (s.get("tempInlet") if s.get("tempInlet") is not None
                       else s.get("tempExhaust") if s.get("tempExhaust") is not None
                       else s.get("tempCpuMax"))
