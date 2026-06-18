@@ -829,13 +829,22 @@ class GusClient:
         ids_clause = _safe_ids_clause(ticket_sf_ids)
         if not ids_clause:
             return []
+        # Filter Feeds.Type in SOQL so the inner LIMIT doesn't get burned
+        # on TrackedChange / status-history rows (each Case.Status flip
+        # generates one). Without this, a busy case quickly blows past
+        # 50 feed slots on system events alone and pushes real user
+        # posts out of the window — which is how AdvancedTextPosts like
+        # "@DCEng-FRA3 please repair the following links" get dropped.
         soql = (
             "SELECT Id, CaseNumber, Status, "
             "(SELECT Id, ParentId, Type, Body, CreatedDate, "
             "CreatedBy.Username, "
             "(SELECT Id, CommentBody, CreatedDate, CreatedBy.Username "
             " FROM FeedComments ORDER BY CreatedDate DESC LIMIT 25) "
-            "FROM Feeds ORDER BY CreatedDate DESC LIMIT 50) "
+            "FROM Feeds "
+            "WHERE Type IN "
+            "('TextPost','AdvancedTextPost','ContentPost','LinkPost') "
+            "ORDER BY CreatedDate DESC LIMIT 50) "
             f"FROM Case WHERE Id IN ({ids_clause})"
         )
         records = self._sf.query_all(soql)["records"]
@@ -846,9 +855,16 @@ class GusClient:
             case_number = case.get("CaseNumber") or ""
             feeds = (case.get("Feeds") or {}).get("records") or []
             for f in feeds:
-                # Top-level posts — only TextPost / ContentPost are real
-                # comments (TrackedChange is a duplicate of CaseHistory).
-                if f.get("Type") in ("TextPost", "ContentPost"):
+                # Top-level posts — keep every shape of real user post
+                # (TextPost, AdvancedTextPost — used by GUS for formatted
+                # bodies with @-mentions like "to GUS Only" announcements,
+                # ContentPost for posts with attachments, LinkPost for
+                # link shares). Drop TrackedChange (duplicate of
+                # CaseHistory) and other system-generated event types.
+                if f.get("Type") in (
+                    "TextPost", "AdvancedTextPost",
+                    "ContentPost", "LinkPost",
+                ):
                     out.append({
                         "Id": f["Id"],
                         "ParentId": case_id,
@@ -1092,8 +1108,14 @@ class GusClient:
         name_by_id = {r["id"]: r["name"] for r in self._cached_rows}
 
         # Broader id set so status changes ON cases that are now in
-        # 'Return to Service' (and therefore no longer active) still surface.
-        history_ids = self._query_frankfurt_case_ids() or active_ids
+        # 'Return to Service' (and therefore no longer active) still
+        # surface. Union with active_ids: the SOQL filter relies on
+        # SM_Data_Center_Facility__c INCLUDES (sites), but some cases
+        # in the report leave that field NULL — they would silently
+        # drop out of the activity log otherwise. The report itself
+        # already proves they're in scope, so trust it.
+        soql_ids = self._query_frankfurt_case_ids()
+        history_ids = list({*soql_ids, *active_ids}) if soql_ids else active_ids
 
         # Build the mention-token list once per request — see
         # _mention_needles() for what goes into it. Lower-cased so a
@@ -1126,7 +1148,11 @@ class GusClient:
                 ))
 
         if activity_type in ("all", "comment"):
-            for rec in self._query_feed(active_ids):
+            # CaseComment runs on the same broader history universe as
+            # status changes and Chatter — so a comment posted shortly
+            # before a case moved to RTS / Closed still surfaces in the
+            # log for as long as we keep its history (LAST_N_DAYS:14).
+            for rec in self._query_feed(history_ids):
                 parent_id = rec["ParentId"]
                 parent = rec.get("Parent") or {}
                 body = rec.get("CommentBody") or ""
