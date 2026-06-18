@@ -156,14 +156,25 @@ def graphql(query: str, variables: Optional[dict[str, Any]] = None) -> dict[str,
 
 
 # Map Coolan's raw reporting_state to a UI-friendly bucket.
-# Semantics are global: 'active' = host is reporting / alive,
-# 'missing' = host is not reporting / unreachable. The UI then paints
-# active = green, missing = red. ARCHIVED_* counts as missing because
-# the host has been removed from Coolan altogether.
+#
+# Coolan exposes six values in practice (verified live against the FRA
+# tenant): ACTIVE, DELAYED_REPORTING, ANOMALOUS, MISSING,
+# ARCHIVED_AUTOMATED, ARCHIVED_MANUAL. The Coolan UI itself paints
+# anything except ACTIVE in shades of grey; we split that further so the
+# snowflake conveys severity at a glance:
+#
+#   active  -> green   (ACTIVE: host is reporting cleanly)
+#   delayed -> grey    (DELAYED_REPORTING / ANOMALOUS: same shade as
+#                       Coolan's own UI; means safe to work on the box)
+#   missing -> red     (MISSING / ARCHIVED_*: host gone)
+#
+# Earlier the map had DELAYED_REPORTING + ANOMALOUS in `active`, which
+# made the snowflake stay green for hosts that Coolan visibly treats
+# as down (e.g. blade0-5, RMA 91730641, last_report ~16h ago).
 _REPORTING_STATE_MAP = {
     "ACTIVE": "active",
-    "DELAYED_REPORTING": "active",
-    "ANOMALOUS": "active",
+    "DELAYED_REPORTING": "delayed",
+    "ANOMALOUS": "delayed",
     "MISSING": "missing",
     "ARCHIVED_AUTOMATED": "missing",
     "ARCHIVED_MANUAL": "missing",

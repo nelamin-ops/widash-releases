@@ -482,3 +482,90 @@ export function fetchTempsHistory(args: {
   return apiFetch(`/api/temps/device/history?${params.toString()}`)
     .then(handle<TempsHistoryResponse>);
 }
+
+// ----- Chat sidebar (Claude over WiDash) ----------------------------
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export type ChatStreamEvent =
+  | { kind: "delta"; text: string }
+  | { kind: "tool"; name: string; status: "started" | "finished" }
+  | { kind: "done"; usage?: { input: number; output: number } }
+  | { kind: "error"; message: string; code?: string };
+
+/** Stream a chat completion from the backend SSE endpoint. Yields one
+ *  event at a time. Caller is expected to render `delta.text` into the
+ *  current assistant message and stop on `done`/`error`.
+ *
+ *  Uses fetch() + a manual SSE parser rather than EventSource because
+ *  EventSource is GET-only and we need POST + JSON body. The X-Report-Id
+ *  header is attached the same way as the rest of the dashboard. */
+export async function* streamChat(
+  body: { messages: ChatMessage[]; model: string },
+  signal?: AbortSignal,
+): AsyncGenerator<ChatStreamEvent, void, void> {
+  const ids = getActiveReportIds();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (ids.length > 0) headers["X-Report-Id"] = ids.join(",");
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    let detail: any = undefined;
+    try { detail = await res.json(); } catch { /* ignore */ }
+    const message =
+      (detail?.detail?.message as string) ||
+      (detail?.message as string) ||
+      `HTTP ${res.status}`;
+    yield { kind: "error", message, code: detail?.detail?.error };
+    return;
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    yield { kind: "error", message: "no_response_body" };
+    return;
+  }
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE frames are separated by a blank line.
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        let event = "message";
+        let dataLines: string[] = [];
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event: ")) event = line.slice(7).trim();
+          else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+        }
+        if (dataLines.length === 0) continue;
+        let data: any;
+        try { data = JSON.parse(dataLines.join("\n")); }
+        catch { continue; }
+        if (event === "delta") yield { kind: "delta", text: data.text ?? "" };
+        else if (event === "tool")
+          yield { kind: "tool", name: data.name, status: data.status };
+        else if (event === "done")
+          yield { kind: "done", usage: data.usage };
+        else if (event === "error")
+          yield { kind: "error", message: data.message, code: data.code };
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+  }
+}

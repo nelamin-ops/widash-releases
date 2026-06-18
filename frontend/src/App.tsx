@@ -13,6 +13,7 @@ import { formatAssetPath } from "./assetPath";
 import { RegionSettingsModal } from "./components/RegionSettingsModal";
 import { PatchplanExplorer } from "./components/PatchplanExplorer";
 import { TempsExplorer } from "./components/TempsExplorer";
+import { ChatSidebar } from "./components/ChatSidebar";
 
 // CaseDetailSheet pulls in chatter, edit modal, lookup combobox, and
 // the Coolan components panel — all of which the dashboard doesn't
@@ -233,11 +234,13 @@ export default function App() {
     const stateLine =
       state === "missing"
         ? t("details.coolanStateMissing")
-        : state === "active"
-          ? t("details.coolanStateActive")
-          : state === "unknown"
-            ? t("details.coolanStateUnknown")
-            : undefined;
+        : state === "delayed"
+          ? t("details.coolanStateDelayed")
+          : state === "active"
+            ? t("details.coolanStateActive")
+            : state === "unknown"
+              ? t("details.coolanStateUnknown")
+              : undefined;
     openLinks(
       `coolan:${ticket.id}`,
       t("details.coolanTooltipTitle", { name: ticket.name }),
@@ -474,6 +477,7 @@ export default function App() {
 
       <PatchplanExplorer />
       <TempsExplorer sites={[...(active?.sites ?? ALL_LOCATIONS)]} />
+      <ChatSidebar />
     </div>
   );
 }

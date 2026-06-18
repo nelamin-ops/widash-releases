@@ -18,6 +18,7 @@ from . import (
 )
 from . import patchplan as patchplan_mod
 from . import update_check
+from . import chat as chat_mod
 from .cache import TtlCache
 from .gus_client import (
     GusClient, DEFAULT_REPORT_ID, SITE_REPORTS, install_connection_retry,
@@ -34,6 +35,10 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Chat sidebar — read-only Claude assistant over WiDash data. Lives in
+# its own module to keep main.py focused on the dashboard endpoints.
+app.include_router(chat_mod.router)
 
 _cache = TtlCache(ttl_seconds=30)
 # Patchplan: index of all master-patchplan CSV exports, used by the

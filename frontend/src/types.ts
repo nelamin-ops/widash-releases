@@ -87,7 +87,11 @@ export interface ActivityEvent {
   mentionsMe?: boolean;
 }
 
-export type CoolanReportingState = "missing" | "active" | "unknown";
+export type CoolanReportingState =
+  | "active"
+  | "delayed"
+  | "missing"
+  | "unknown";
 
 export type CaseFieldType =
   | "text" | "textarea" | "picklist" | "multipicklist"

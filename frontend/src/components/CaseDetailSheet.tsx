@@ -296,16 +296,19 @@ export function CaseDetailSheet({
   })();
 
   // Coolan reporting-state pill — same colour semantics as the
-  // details-table snowflake: active = green, missing = red,
+  // details-table snowflake: active = green, delayed = grey (matches
+  // Coolan's UI; means "safe to work on this device"), missing = red,
   // unknown / no record = muted.
   const coolanState = ticket.coolanReportingState;
   const hasCoolan = ticket.coolanLinks.length > 0;
   const coolanColor =
     coolanState === "active" ? "text-emerald-600 dark:text-emerald-300"
+    : coolanState === "delayed" ? "text-slate-500 dark:text-slate-400"
     : coolanState === "missing" ? "text-rose-600 dark:text-rose-300"
     : "opacity-60";
   const coolanLabel =
     coolanState === "active" ? "Active"
+    : coolanState === "delayed" ? "Delayed"
     : coolanState === "missing" ? "Missing"
     : coolanState === "unknown" ? "Unknown"
     : "";

@@ -168,6 +168,12 @@ class GusClient:
         self._fra_case_ids_cache: list[str] = []
         # case_id -> data center facility ("FRA1" / "FRA2" / "FRA3" / multi)
         self._fra_facility_by_id: dict[str, str] = {}
+        # Wall-clock seconds at which the case-ids cache was populated.
+        # 0 means "no cache yet". Used to expire the cache on its own
+        # (independent of /api/refresh) so a case that just transitioned
+        # out of LAST_N_DAYS:14 isn't missed by the RTS-today counter or
+        # the activity log.
+        self._fra_case_ids_cached_at: float = 0.0
         self._user_id_cache: Optional[str] = None
         self._user_info_cache: Optional[dict] = None
 
@@ -456,11 +462,18 @@ class GusClient:
                 out.add(f"{p}{i}")
         return sorted(out)
 
+    # Short TTL for the case-id list backing CaseHistory queries (RTS
+    # today, activity log). Long enough to absorb the polling cadence
+    # without re-issuing the SOQL every request, short enough that a
+    # case which just moved into LAST_N_DAYS:14 (e.g. freshly opened or
+    # freshly transitioned to Return to Service) appears within a poll
+    # cycle without forcing the user to hit /api/refresh.
+    _CASE_IDS_TTL_S = 60.0
+
     def _query_frankfurt_case_ids(self) -> list[str]:
         """Return all in-scope case Ids modified in the last 14 days.
 
-        Cached for the lifetime of the client (refreshed when /api/refresh
-        rebuilds the singleton). Used to scope CaseHistory queries —
+        Cached with a 60-second TTL. Used to scope CaseHistory queries —
         including cases that have already moved to 'Return to Service'
         and dropped out of the active report. Site scope is derived
         from the active report so the same query works for FRA / CDG /
@@ -468,7 +481,12 @@ class GusClient:
         """
         if self._sf is None:
             return []
-        if self._fra_case_ids_cache:
+        import time as _time
+        now = _time.time()
+        if (
+            self._fra_case_ids_cache
+            and (now - self._fra_case_ids_cached_at) < self._CASE_IDS_TTL_S
+        ):
             return self._fra_case_ids_cache
         sites = self._report_site_codes()
         sites_clause = ",".join(f"'{s}'" for s in sites)
@@ -487,6 +505,7 @@ class GusClient:
                 facility_by_id[rec_id] = rec.get("SM_Data_Center_Facility__c") or ""
             self._fra_case_ids_cache = ids
             self._fra_facility_by_id = facility_by_id
+            self._fra_case_ids_cached_at = now
             return ids
         except SalesforceExpiredSession:
             raise

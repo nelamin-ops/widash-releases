@@ -239,12 +239,17 @@ export function DetailsTable({
         const state = ticket.coolanReportingState;
         // Colour the snowflake by the reporting state — applied globally
         // across all statuses. active = green (host alive and reporting),
-        // missing = red (host not reporting), unknown = muted grey.
+        // delayed = grey (DELAYED_REPORTING / ANOMALOUS — same shade as
+        // Coolan's UI, signals "safe to work on the device"), missing =
+        // red, unknown = muted grey.
         let colorClass = "";
         let stateLabel = "";
         if (state === "active") {
           colorClass = "text-emerald-600 dark:text-emerald-300";
           stateLabel = "Active";
+        } else if (state === "delayed") {
+          colorClass = "text-slate-500 dark:text-slate-400";
+          stateLabel = "Delayed";
         } else if (state === "missing") {
           colorClass = "text-rose-600 dark:text-rose-300";
           stateLabel = "Missing";
