@@ -26,6 +26,9 @@ echo "▸ Aktualisiere Python-Abhängigkeiten…"
 source backend/.venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet -r backend/requirements.txt
+# Chromium nachziehen falls Playwright-Version es will (idempotent —
+# läd nichts neu wenn alles aktuell).
+python -m playwright install chromium >/dev/null
 deactivate
 echo -e "${GREEN}✓ Python-Abhängigkeiten aktuell${RESET}"
 

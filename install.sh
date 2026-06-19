@@ -59,6 +59,11 @@ fi
 source backend/.venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet -r backend/requirements.txt
+# Chromium für Playwright (Coolan-Auto-SSO). ~150 MB Download beim
+# ersten Setup; ohne diesen Schritt scheitert "Browser öffnen" im
+# Coolan-Pill mit "Executable doesn't exist".
+echo "▸ Lade Chromium für Coolan-Auto-Auth (~150 MB beim ersten Mal)…"
+python -m playwright install chromium >/dev/null
 deactivate
 echo -e "${GREEN}✓ Python-Abhängigkeiten installiert${RESET}"
 
