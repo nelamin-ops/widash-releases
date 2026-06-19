@@ -57,6 +57,21 @@ _clients_by_report: dict[str, GusClient] = {}
 _singleton_token: str | None = None
 
 _VALID_REPORT_ID = re.compile(r"^[a-zA-Z0-9]{15,18}$")
+# Salesforce object ids are 15- or 18-char alphanumeric. Reused at every
+# endpoint that takes a path-parameter id and reaches into SOQL.
+_SF_ID_LOOSE = _VALID_REPORT_ID
+
+
+def _require_sf_id(value: str) -> JSONResponse | None:
+    """Return a 400 JSONResponse if ``value`` is not a SF id, else None.
+
+    Use at the top of any endpoint with a path-parameter id that
+    eventually lands in a SOQL ``WHERE Id = '…'`` clause. SOQL has no
+    parameter binding so untrusted ids would be an injection vector.
+    """
+    if not _SF_ID_LOOSE.match(value or ""):
+        return JSONResponse(status_code=400, content={"error": "bad_id"})
+    return None
 
 
 def _resolve_report_ids(x_report_id: str | None) -> list[str]:
@@ -923,6 +938,8 @@ def temps_coolan_snapshot(uuid: str = Query(...)):
 @app.get("/api/case/{case_id}", response_model=CaseDetailResponse)
 def get_case(case_id: str, client: GusClient = Depends(get_gus_client)):
     """Structured detail view for a single Case + its linked Tech_Asset."""
+    if (err := _require_sf_id(case_id)) is not None:
+        return err
     cache_key = f"case:{case_id}"
     cached = _cache.get(cache_key)
     if cached is not None:
@@ -1011,6 +1028,8 @@ def patch_case(
     client: GusClient = Depends(get_gus_client),
 ):
     """Apply a field-changes payload to a Case. All-or-nothing."""
+    if (err := _require_sf_id(case_id)) is not None:
+        return err
     result = _do_write_record("Case", case_id, payload.changes, client)
     if isinstance(result, JSONResponse):
         return result
@@ -1029,6 +1048,8 @@ def patch_asset(
     Same shape as the case endpoint — schema-driven so it Just Works
     once the user's profile has the asset write permission.
     """
+    if (err := _require_sf_id(asset_id)) is not None:
+        return err
     result = _do_write_record(
         "Tech_Asset__c", asset_id, payload.changes, client,
     )
@@ -1062,6 +1083,12 @@ def post_case_comment(
     client: GusClient = Depends(get_gus_client),
 ):
     """Post a Chatter post / FeedComment / CaseComment for a case."""
+    if (err := _require_sf_id(case_id)) is not None:
+        return err
+    if payload.parentFeedItemId and (
+        err := _require_sf_id(payload.parentFeedItemId)
+    ) is not None:
+        return err
     sf = client._sf
     if sf is None:
         return JSONResponse(
@@ -1126,6 +1153,10 @@ def patch_case_comment(
     addressed via ``entry_id`` + ``kind``. Salesforce enforces the
     ownership check (a non-author update raises INSUFFICIENT_ACCESS).
     """
+    if (err := _require_sf_id(case_id)) is not None:
+        return err
+    if (err := _require_sf_id(entry_id)) is not None:
+        return err
     sf = client._sf
     if sf is None:
         return JSONResponse(
@@ -1138,14 +1169,16 @@ def patch_case_comment(
             status_code=400,
             content={"error": "empty", "message": "Comment body is empty."},
         )
+    if payload.kind not in ("post", "comment"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_kind", "message": f"unknown kind {payload.kind!r}"},
+        )
     try:
         if payload.kind == "post":
             sf.FeedItem.update(entry_id, {"Body": body})
-        elif payload.kind == "comment":
-            sf.FeedComment.update(entry_id,
-                status_code=400,
-                content={"error": "bad_kind", "message": f"unknown kind {payload.kind!r}"},
-            )
+        else:  # "comment"
+            sf.FeedComment.update(entry_id, {"CommentBody": body})
     except SalesforceExpiredSession:
         raise
     except SalesforceError as e:
@@ -1158,9 +1191,6 @@ def patch_case_comment(
         )
     _cache.delete_prefix(f"case_feed:{case_id}:")
     return {"status": "ok"}
-
-
-_SF_ID_LOOSE = re.compile(r"^[a-zA-Z0-9]{15,18}$")
 
 
 @app.get("/api/lookup/{sobject}")
@@ -1271,8 +1301,8 @@ def get_avatar(
     visited in GUS. We fetch with the sf-CLI token instead, cache for
     an hour, and serve the bytes directly.
     """
-    if not user_id or not user_id.replace(".", "").isalnum():
-        return JSONResponse(status_code=400, content={"error": "bad_id"})
+    if (err := _require_sf_id(user_id)) is not None:
+        return err
     cached = _avatar_cache.get(user_id)
     now = time.time()
     if cached and now - cached[0] < _AVATAR_TTL:
@@ -1316,6 +1346,8 @@ def get_case_feed(
     client: GusClient = Depends(get_gus_client),
 ):
     """Combined Chatter + CaseComment + EmailMessage feed for one case."""
+    if (err := _require_sf_id(case_id)) is not None:
+        return err
     cache_key = f"case_feed:{case_id}:{limit}"
     cached = _cache.get(cache_key)
     if cached is not None:

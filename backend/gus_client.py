@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from simple_salesforce import Salesforce
-from simple_salesforce.exceptions import SalesforceExpiredSession
+from simple_salesforce.exceptions import SalesforceError, SalesforceExpiredSession
 
 logger = logging.getLogger("widash.gus")
 
