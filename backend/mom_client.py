@@ -106,10 +106,6 @@ _DOWNSAMPLE_BY_TIMEFRAME = {
 # Aggregations the user can pick.
 AGGREGATIONS: tuple[str, ...] = ("max", "avg", "min")
 
-# Argus device names look like "leaf3-ncg6-fra3", "sw2c-pod320-ncg28-fra3"
-# etc. Letters/digits/hyphens, lower-case.
-_DEVICE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}$")
-
 
 class Series(TypedDict, total=False):
     """One metric series returned by Argus."""
@@ -672,7 +668,3 @@ def record_error(msg: Optional[str]) -> None:
     """Surface the last network/auth failure for the status pill."""
     global _last_error
     _last_error = msg
-
-
-def is_valid_device_name(name: str) -> bool:
-    return bool(name and _DEVICE_RE.match(name))

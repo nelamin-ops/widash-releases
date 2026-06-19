@@ -186,27 +186,8 @@ class CoolanMachine(TypedDict, total=False):
     state: Optional[str]  # 'missing' | 'active' | None
 
 
-def get_machine_by_uuid(machine_uuid: str) -> Optional[CoolanMachine]:
-    """Return ``{uuid, state}`` for a known UUID, or None on miss/error."""
-    try:
-        data = graphql(
-            "query Q($id: uuid!) { machines_by_pk(id: $id) "
-            "{ id reporting_state } }",
-            {"id": machine_uuid},
-        )
-    except CoolanError:
-        return None
-    machine = data.get("machines_by_pk")
-    if not machine:
-        return None
-    return {
-        "uuid": machine.get("id") or machine_uuid,
-        "state": _REPORTING_STATE_MAP.get(machine.get("reporting_state")),
-    }
-
-
 def get_machines_by_uuids(uuids: list[str]) -> dict[str, CoolanMachine]:
-    """Batched ``get_machine_by_uuid``: one GraphQL call for many uuids.
+    """Batched UUID lookup: one GraphQL call for many uuids.
 
     Returns ``{uuid: {uuid, state}}`` for every uuid present in Coolan;
     missing uuids are simply absent from the dict. Invalid uuids are
@@ -241,11 +222,11 @@ def get_machines_by_search_batch(
 ) -> dict[str, CoolanMachine]:
     """Batched serial / hostname lookup for many tickets at once.
 
-    Same shape semantics as ``get_machine_by_search`` (the report's
-    ``"<asset_tag> / <serial> / <hostname>"`` format), but issues a
-    single Hasura ``_or`` query that matches any of the serials or
-    hostnames. Returns ``{asset_name: machine}`` so the caller can
-    map results back to the originating ticket cheaply.
+    The SF report's asset name is shaped as
+    ``"<asset_tag> / <serial> / <hostname>"``. We issue a single Hasura
+    ``_or`` query that matches any of the serials or hostnames and return
+    ``{asset_name: machine}`` so the caller can map results back to the
+    originating ticket cheaply.
     """
     needles_by_name: dict[str, tuple[str, str]] = {}
     serials: set[str] = set()
@@ -304,45 +285,6 @@ def get_machines_by_search_batch(
             "state": _REPORTING_STATE_MAP.get(m.get("reporting_state")),
         }
     return out
-
-
-def get_machine_by_search(asset_name: str) -> Optional[CoolanMachine]:
-    """Best-effort lookup when the case has no Coolan link.
-
-    The SF report's asset name is shaped as
-    ``"<asset_tag> / <serial_number> / <hostname>"`` — we try the serial
-    first because it's the most stable key in Coolan, and fall back to
-    the hostname fragment if serial-search misses.
-    """
-    if not asset_name:
-        return None
-    parts = [p.strip() for p in asset_name.split("/") if p.strip()]
-    serial = parts[1] if len(parts) >= 2 else ""
-    hostname_fragment = parts[-1] if parts else ""
-
-    needles: list[tuple[str, str]] = []  # (where_field, value)
-    if serial:
-        needles.append(("serial_number", serial))
-    if hostname_fragment:
-        needles.append(("hostname", hostname_fragment))
-
-    for field, value in needles:
-        try:
-            data = graphql(
-                f"query Q($q: String!) {{ machines("
-                f"where: {{{field}: {{_ilike: $q}}}}, limit: 1) "
-                "{ id reporting_state } }",
-                {"q": f"%{value}%"},
-            )
-        except CoolanError:
-            continue
-        rows = data.get("machines") or []
-        if rows:
-            return {
-                "uuid": rows[0].get("id") or "",
-                "state": _REPORTING_STATE_MAP.get(rows[0].get("reporting_state")),
-            }
-    return None
 
 
 class CoolanComponentAttribute(TypedDict):
