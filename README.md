@@ -7,45 +7,51 @@ with Argus time-series for live rack temperatures, and lets you read +
 write Salesforce cases, chatter, and case fields without leaving the
 tab.
 
-Default deployment is Frankfurt, but the report id is configurable
-per user via the in-app settings modal so the same binary works for
-any DCEng region as soon as someone registers their site's RMA
-report.
+Frankfurt is the only region pre-registered today; the multi-region
+plumbing is in place so adding Paris / Amsterdam / Tokyo / … is one
+line in `SITE_REPORTS` once their report ids are known. Each user
+picks their region in the in-app settings modal, or WiDash
+auto-detects it from recent SF activity.
+
+## Prerequisites
+
+Three local tools — install once per machine:
+
+- **Salesforce CLI** (`sf`) — https://developer.salesforce.com/tools/salesforcecli
+- **Python 3.11** — `brew install python@3.11`
+- **Bun** — auto-installed by `install.sh` on first run if missing
 
 ## Setup
 
-Once per machine.
-
 ```bash
-# Salesforce login (sf-CLI). Has to be done before WiDash is started
-# and re-done whenever the SF session expires.
-sf org login
-
-# Backend deps
-cd backend
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-deactivate
-
-# Frontend deps
-cd ../frontend
-bun install
-cd ..
+git clone https://github.com/nelamin-ops/widash-releases.git widash
+cd widash
+./install.sh        # backend venv + frontend deps + chromium for Coolan auto-auth
+sf org login web    # opens browser for SF login
+./start.sh          # starts backend + frontend, opens http://localhost:5173
 ```
 
-## Run
-
-```bash
-./start.sh
-```
-
-Opens `http://localhost:5173`. Backend API is at `http://localhost:8000`.
+`./install.sh` is idempotent — re-run it after a `git pull` and it
+just refreshes deps. `./start.sh` kills any stale uvicorn / vite from
+a previous run before booting fresh ones.
 
 On first launch the **Region settings** modal opens automatically.
-Pick your GUS RMA report from the dropdown (Frankfurt is preconfigured)
-or paste a custom report id. WiDash auto-detects your region from
-your last 90 days of edited cases and pre-fills the suggestion.
+WiDash auto-detects your region from your last 90 days of edited
+cases and pre-fills the suggestion. Confirm with one click, or paste
+a custom report id. Coolan, mom.dmz, and the master patchplan are
+optional data sources — they activate themselves once you connect
+them via the corresponding pills in the header (or, for the
+patchplan, drop CSVs into `~/.widash/patchplan/`).
+
+## Updating
+
+If the dashboard shows the yellow update banner:
+
+```bash
+cd ~/path/to/widash
+./update.sh         # git pull + refresh deps
+./start.sh
+```
 
 ## Tests
 
