@@ -53,6 +53,43 @@ cd ~/path/to/widash
 ./start.sh
 ```
 
+## Optional data sources
+
+The core dashboard works with just the sf-CLI. The pills in the
+header light up the optional integrations:
+
+### Master patchplan (🔌 bubble bottom-right)
+
+If your site maintains a master-patchplan Google Sheet, drop CSV
+exports into `~/.widash/patchplan/` and click **Refresh** in the
+explorer. Without CSVs the bubble shows a setup hint instead of an
+empty tree — feature is fully opt-in. Files stay local; nothing is
+uploaded.
+
+### mom.dmz live temperatures (🌡 pill in the header)
+
+Click the 🌡 pill — the modal walks you through pasting a Cookie
+header from `mom.dmz.salesforce.com/mom/datacenter-temperature`
+(DevTools → Network → any request → copy `Cookie`). Saved to
+`~/.widash/mom_auth.json` (chmod 600). Re-paste when the cookie
+expires (pill turns red).
+
+### Coolan component health (❄ pill in the header)
+
+Click the ❄ pill, then **Open browser window** for the first run
+(MFA happens in a visible Chromium window). Subsequent reauths use
+**Auto-connect (headless)**. Manual `Bearer …` paste is the
+fallback if both fail. Token is saved to
+`~/.widash/coolan_auth.json` (chmod 600).
+
+### Add a new region
+
+Send Najih the GUS RMA report id for your DC; one line goes into
+`SITE_REPORTS` in `backend/gus_client.py` and the next release
+makes the region available to everyone. Until then, paste the
+report id directly in the Region settings modal — works
+immediately but is per-user, not shared.
+
 ## Tests
 
 ```bash
@@ -286,6 +323,7 @@ patchplan/                     CSVs exported from the master Google Sheet
 ```
 
 ## When the SF token rotates
-Run `sf org login` again, then click the refresh button in the
-WiDash header (or wait for the next poll — the auth-expired banner
-links to the same flow).
+
+Run `sf org login web` again, then click **Retry** in the
+auth-expired banner (or just wait — the next poll picks up the
+fresh token automatically).
