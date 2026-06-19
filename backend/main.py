@@ -836,9 +836,12 @@ def temps_rack(
     return payload
 
 
-# Device names look like "leaf3-ncg6-fra3", "sw2c-pod320-ncg28-fra3" etc.
-# Lower-case letters / digits / hyphen, must end with the site code.
-_DEVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}-[a-z]{3}\d$")
+# Device names look like "leaf3-ncg6-fra3", "sw2c-pod320-ncg28-fra3",
+# "spn1-ncg0-cdg2", "leaf-iad1" etc. Lower-case letters / digits /
+# hyphen, must end with a 2-4-letter site code optionally followed by a
+# 1-3 digit number — wide enough to cover every Salesforce DC naming
+# convention without listing them.
+_DEVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}-[a-z]{2,4}\d{0,3}$")
 
 
 @app.get("/api/temps/device/history")

@@ -1,4 +1,4 @@
-__version__ = "1.5"
+__version__ = "1.6"
 
 # GitHub-Repo das für Releases genutzt wird.
 # Format: "owner/repo"

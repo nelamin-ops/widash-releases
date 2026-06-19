@@ -6,7 +6,7 @@ import type {
   CaseDetailResponse, CaseDetailSection as ApiSection,
   CoolanComponent, RmaTicket,
 } from "../types";
-import { useLanguage } from "../hooks/useLanguage";
+import { useLanguage, localeFor } from "../hooks/useLanguage";
 import { formatAssetPath } from "../assetPath";
 import { colorForStatus } from "../statusColors";
 import { useWriteMode } from "../hooks/useWriteMode";
@@ -1022,7 +1022,8 @@ function FieldView({
   recordLookupName: (id: string, name: string) => void;
   getFieldEffectiveValue: (apiName: string) => unknown;
 }) {
-  const display = formatValue(field);
+  const { lang } = useLanguage();
+  const display = formatValue(field, localeFor(lang));
   // In edit mode the draft (if any) wins over the live value, otherwise
   // we seed from the live value so a user typing in a textarea sees what
   // was already there.
@@ -1906,16 +1907,16 @@ function prettyType(t: string): string {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-function formatValue(field: SheetField): string {
+function formatValue(field: SheetField, locale: string): string {
   const v = field.value;
   if (v === null || v === undefined) return "";
   if (field.type === "lookup") return field.displayValue || "";
   if (field.type === "bool") return v ? "✓ yes" : "— no";
   if (field.type === "datetime" && typeof v === "string") {
-    try { return new Date(v).toLocaleString(); } catch { return v; }
+    try { return new Date(v).toLocaleString(locale); } catch { return v; }
   }
   if (field.type === "date" && typeof v === "string") {
-    try { return new Date(v).toLocaleDateString(); } catch { return v; }
+    try { return new Date(v).toLocaleDateString(locale); } catch { return v; }
   }
   if (field.type === "currency" && typeof v === "number") {
     return v.toFixed(2);

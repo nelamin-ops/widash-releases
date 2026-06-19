@@ -8,10 +8,6 @@ import { CoolanStatusPill } from "./CoolanStatusPill";
 import { MomStatusPill } from "./MomStatusPill";
 import { WriteModePill } from "./WriteModePill";
 
-// Default site list — used until the backend tells us which sites the
-// active report covers. Frontend overlays the live ``sites`` field
-// from /api/rma/active so the same UI works for any region.
-export const ALL_LOCATIONS = ["FRA1", "FRA2", "FRA3"] as const;
 export type LocationFilter = string;
 
 interface HeaderProps {
@@ -19,8 +15,11 @@ interface HeaderProps {
   selectedLocations: Set<string>;
   onToggleLocation: (loc: LocationFilter) => void;
   locationCounts?: Record<string, number>;
-  /** Site codes covered by the active report (FRA1/FRA2/FRA3 by default,
-   *  CDG1-3 once a Paris report is configured, etc.). */
+  /** Site codes covered by the active report (FRA1/FRA2/FRA3 for the
+   *  Frankfurt report, CDG1/2/3 for Paris, etc.). Empty until the
+   *  first /api/rma/active response arrives — the filter row stays
+   *  empty during that window so we don't render placeholder pills
+   *  for the wrong region. */
   sites?: readonly string[];
   /** Click on the gear icon — opens the settings modal. */
   onOpenSettings?: () => void;
@@ -30,8 +29,7 @@ export function Header({
   onRefresh, selectedLocations, onToggleLocation, locationCounts,
   sites, onOpenSettings,
 }: HeaderProps) {
-  const visibleSites: readonly string[] =
-    sites && sites.length > 0 ? sites : ALL_LOCATIONS;
+  const visibleSites: readonly string[] = sites ?? [];
   const { theme, toggle } = useTheme();
   const { t, lang, setLang } = useLanguage();
   const { size: fontSize, cycle: cycleFont } = useFontSize();

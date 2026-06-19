@@ -49,7 +49,7 @@ from .models import (
 # Salesforce 15- or 18-character record IDs are alphanumeric only. The IDs we
 # pass into SOQL all originate from authenticated SF responses today, but this
 # guard keeps the f-string interpolation safe if a future code path ever feeds
-# an unvalidated value into _query_history / _query_feed / _query_frankfurt_…
+# an unvalidated value into _query_history / _query_feed / _query_active_case_ids.
 _SF_ID_RE = re.compile(r"^[a-zA-Z0-9]{15,20}$")
 
 
@@ -93,17 +93,16 @@ STATUS_COLORS = {
 # as-is rather than mapping to a P0–P3 schema — Sev0 is highest, Sev5 lowest.
 ALL_SEVERITIES = ("Sev0", "Sev1", "Sev2", "Sev3", "Sev4", "Sev5")
 
-# Service accounts whose chatter is too noisy to surface in the activity log.
-# Anything else stays.
-NOISE_ACTORS = frozenset({"svc_grok-fra@gus.com"})
+# Username prefixes for service accounts whose chatter is too noisy to
+# surface in the activity log. Per region these look like
+# ``svc_grok-fra@gus.com`` / ``svc_grok-cdg@gus.com`` etc., so we match
+# on the common prefix instead of one explicit address per region.
+NOISE_ACTOR_PREFIXES = ("svc_grok-",)
 
-# Last-resort fallback for mention matching when the active SF user
-# can't be resolved (offline tests, broken session). Real mention
-# tokens are derived per request via _mention_needles() — see below.
-_FALLBACK_MENTION_NEEDLES = (
-    "@dceng-fra3",
-    "@dceng fra3",
-)
+
+def _is_noise_actor(actor: str | None) -> bool:
+    a = (actor or "").lower()
+    return any(a.startswith(p) for p in NOISE_ACTOR_PREFIXES)
 
 # Detail-column indices in the report response (must match the report's
 # `detailColumns` order — see report metadata).
@@ -165,15 +164,15 @@ class GusClient:
         self._now = now
         self._report_id = report_id
         self._cached_rows: list[dict] = []
-        self._fra_case_ids_cache: list[str] = []
-        # case_id -> data center facility ("FRA1" / "FRA2" / "FRA3" / multi)
-        self._fra_facility_by_id: dict[str, str] = {}
+        self._active_case_ids_cache: list[str] = []
+        # case_id -> data center facility ("FRA1" / "CDG2" / multi)
+        self._facility_by_case_id: dict[str, str] = {}
         # Wall-clock seconds at which the case-ids cache was populated.
         # 0 means "no cache yet". Used to expire the cache on its own
         # (independent of /api/refresh) so a case that just transitioned
         # out of LAST_N_DAYS:14 isn't missed by the RTS-today counter or
         # the activity log.
-        self._fra_case_ids_cached_at: float = 0.0
+        self._active_case_ids_cached_at: float = 0.0
         self._user_id_cache: Optional[str] = None
         self._user_info_cache: Optional[dict] = None
 
@@ -333,6 +332,11 @@ class GusClient:
         if not user_id or not _SF_ID_RE.match(user_id):
             return [], 0
         sites = self._report_site_codes()
+        if not sites:
+            # No site scope yet — the report hasn't loaded. Return empty
+            # rather than firing an INCLUDES() clause with no values
+            # (which is invalid SOQL anyway).
+            return [], 0
         sites_clause = ",".join(f"'{s}'" for s in sites)
         soql = (
             "SELECT CaseId, NewValue, CreatedDate, "
@@ -397,11 +401,12 @@ class GusClient:
         - one ``@dceng-{site}`` / ``@dceng {site}`` pair per site code
           covered by the active report — Frankfurt contributes
           ``dceng-fra1/2/3``, Paris would contribute ``dceng-cdg1/2/3``,
-          and so on without any code change
+          and so on without any code change.
 
-        Falls back to a small static list if no SF user can be resolved
-        (offline test, broken session) so the highlight at least keeps
-        working for the most common alias.
+        Returns an empty tuple if no SF user can be resolved and the
+        report hasn't loaded yet (offline test, broken session) — the
+        caller treats that as "no mentions match", which is correct:
+        we'd rather miss a highlight than highlight everything.
         """
         needles: list[str] = []
         info = self.get_current_user_info() or {}
@@ -418,8 +423,6 @@ class GusClient:
             slug = site.lower()
             needles.append(f"@dceng-{slug}")
             needles.append(f"@dceng {slug}")
-        if not needles:
-            return _FALLBACK_MENTION_NEEDLES
         # Dedupe while preserving order so the cheapest matches go first.
         seen: set[str] = set()
         out: list[str] = []
@@ -437,11 +440,16 @@ class GusClient:
         each site — if FRA1 happens to have zero open RMAs right now we
         still want it visible as a filter pill. So we extract the
         unique prefixes (FRA / CDG / …) and emit prefix1/prefix2/prefix3
-        for each. Falls back to FRA1-3 if the report hasn't loaded yet.
+        for each. Returns an empty list if the report hasn't loaded yet
+        — callers treat that as "no scope known", which is correct: a
+        FRA-shaped fallback would silently filter every other region
+        out of every cross-region SOQL we run.
         """
         if not self._cached_rows:
-            try: self._fetch_rows()
-            except Exception: pass
+            try:
+                self._fetch_rows()
+            except Exception:
+                logger.exception("report rows fetch failed")
         prefixes: set[str] = set()
         seen: set[str] = set()
         for r in self._cached_rows:
@@ -455,7 +463,7 @@ class GusClient:
                 if m:
                     prefixes.add(m.group(1))
         if not prefixes:
-            return ["FRA1", "FRA2", "FRA3"]
+            return []
         out: set[str] = set(seen)
         for p in prefixes:
             for i in (1, 2, 3):
@@ -470,7 +478,7 @@ class GusClient:
     # cycle without forcing the user to hit /api/refresh.
     _CASE_IDS_TTL_S = 60.0
 
-    def _query_frankfurt_case_ids(self) -> list[str]:
+    def _query_active_case_ids(self) -> list[str]:
         """Return all in-scope case Ids modified in the last 14 days.
 
         Cached with a 60-second TTL. Used to scope CaseHistory queries —
@@ -484,11 +492,16 @@ class GusClient:
         import time as _time
         now = _time.time()
         if (
-            self._fra_case_ids_cache
-            and (now - self._fra_case_ids_cached_at) < self._CASE_IDS_TTL_S
+            self._active_case_ids_cache
+            and (now - self._active_case_ids_cached_at) < self._CASE_IDS_TTL_S
         ):
-            return self._fra_case_ids_cache
+            return self._active_case_ids_cache
         sites = self._report_site_codes()
+        if not sites:
+            # Same defensive guard as _query_my_status_changes — empty
+            # scope means the report hasn't loaded; better to return
+            # nothing than to issue an invalid SOQL clause.
+            return []
         sites_clause = ",".join(f"'{s}'" for s in sites)
         soql = (
             "SELECT Id, SM_Data_Center_Facility__c FROM Case "
@@ -503,9 +516,9 @@ class GusClient:
                 rec_id = rec["Id"]
                 ids.append(rec_id)
                 facility_by_id[rec_id] = rec.get("SM_Data_Center_Facility__c") or ""
-            self._fra_case_ids_cache = ids
-            self._fra_facility_by_id = facility_by_id
-            self._fra_case_ids_cached_at = now
+            self._active_case_ids_cache = ids
+            self._facility_by_case_id = facility_by_id
+            self._active_case_ids_cached_at = now
             return ids
         except SalesforceExpiredSession:
             raise
@@ -515,21 +528,22 @@ class GusClient:
     def _count_return_to_service_today(
         self, locations: Optional[set[str]] = None,
     ) -> int:
-        """Count Frankfurt cases whose Status changed to 'Return to Service'
-        since midnight server time today.
+        """Count cases for the active report whose Status changed to
+        'Return to Service' since midnight in the SF user's timezone.
 
-        SOQL doesn't allow filtering CaseHistory.NewValue, so we fetch today's
-        Frankfurt status changes and filter client-side. Resets automatically
-        at midnight because `CreatedDate = TODAY` re-evaluates per call.
+        SOQL doesn't allow filtering CaseHistory.NewValue, so we fetch
+        today's status changes for the active report's site scope and
+        filter client-side. Resets automatically at midnight because
+        ``CreatedDate = TODAY`` re-evaluates per call.
         """
         if self._sf is None:
             return 0
-        ids = self._query_frankfurt_case_ids()
+        ids = self._query_active_case_ids()
         if locations is not None:
             ids = [
                 i for i in ids
                 if any(
-                    loc in (self._fra_facility_by_id.get(i) or "").split(";")
+                    loc in (self._facility_by_case_id.get(i) or "").split(";")
                     for loc in locations
                 )
             ]
@@ -1114,7 +1128,7 @@ class GusClient:
         # in the report leave that field NULL — they would silently
         # drop out of the activity log otherwise. The report itself
         # already proves they're in scope, so trust it.
-        soql_ids = self._query_frankfurt_case_ids()
+        soql_ids = self._query_active_case_ids()
         history_ids = list({*soql_ids, *active_ids}) if soql_ids else active_ids
 
         # Build the mention-token list once per request — see
@@ -1206,10 +1220,11 @@ class GusClient:
                     mentionsMe=mentions_me,
                 ))
 
-        # Drop noise actors (e.g. svc_grok-fra@gus.com) by default. The
-        # `include_bots` toggle lets the UI surface them on demand.
+        # Drop noise actors (e.g. svc_grok-fra@gus.com / svc_grok-cdg@…)
+        # by default. The `include_bots` toggle lets the UI surface them
+        # on demand.
         if not include_bots:
-            events = [e for e in events if e.actor not in NOISE_ACTORS]
+            events = [e for e in events if not _is_noise_actor(e.actor)]
 
         if locations is not None:
             events = [e for e in events if e.location in locations]

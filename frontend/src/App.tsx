@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
-import { Header, ALL_LOCATIONS, type LocationFilter } from "./components/Header";
+import { Header, type LocationFilter } from "./components/Header";
 import { DonutCard } from "./components/DonutCard";
 import { LegendCard } from "./components/LegendCard";
 import { DetailsTable } from "./components/DetailsTable";
@@ -47,8 +47,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [authExpired, setAuthExpired] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Empty set === "all sites of the active report" (the backend treats
+  // a missing locations= param as "no filter"). We start empty so a
+  // non-Frankfurt report doesn't fetch with a stale FRA filter on
+  // first paint.
   const [selectedLocations, setSelectedLocations] = useState<Set<string>>(
-    () => new Set(ALL_LOCATIONS),
+    () => new Set<string>(),
   );
   const [includeBots, setIncludeBots] = useState<boolean>(() => {
     try { return localStorage.getItem("widash.includeBots") === "1"; }
@@ -97,8 +101,9 @@ export default function App() {
     setSelectedLocations((prev) => {
       const next = new Set(prev);
       if (next.has(loc)) {
-        // Don't allow zero locations — re-enable all if user tries to remove the last one.
-        if (next.size === 1) return new Set(ALL_LOCATIONS);
+        // Removing the last selected pill drops back to "all sites"
+        // (empty set). The backend treats no filter as the full
+        // report, so this is the most natural reset.
         next.delete(loc);
       } else {
         next.add(loc);
@@ -476,7 +481,7 @@ export default function App() {
       />
 
       <PatchplanExplorer />
-      <TempsExplorer sites={[...(active?.sites ?? ALL_LOCATIONS)]} />
+      <TempsExplorer sites={[...(active?.sites ?? [])]} />
       <ChatSidebar />
     </div>
   );

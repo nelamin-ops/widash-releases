@@ -185,7 +185,7 @@ _SF_ID_RE = re.compile(r"^[a-zA-Z0-9]{15,18}$")
 _BARE_UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-_SITE_RE = re.compile(r"^[A-Z]{3}[0-9]?$")  # FRA3, CDG2, IAD, etc.
+_SITE_RE = re.compile(r"^[A-Z]{2,4}[0-9]{1,3}$")  # FRA3, CDG2, IAD1, NRT12, …
 _RACK_LABEL_RE = re.compile(r"^[A-Za-z0-9. \-_/]{1,80}$")
 
 # Name picklist that get_tickets_for_status accepts. We pass through
