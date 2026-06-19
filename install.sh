@@ -69,7 +69,7 @@ cd frontend && bun install --silent && cd ..
 echo -e "${GREEN}✓ Frontend-Abhängigkeiten installiert${RESET}"
 
 # ── 6. Patchplan-Verzeichnis anlegen ─────────────────────────────────────────
-PATCHPLAN_DIR="$HOME/Library/Application Support/WiDash/patchplan"
+PATCHPLAN_DIR="$HOME/.widash/patchplan"
 if [ ! -d "$PATCHPLAN_DIR" ]; then
   mkdir -p "$PATCHPLAN_DIR"
   echo -e "${GREEN}✓ Patchplan-Ordner angelegt: ${PATCHPLAN_DIR}${RESET}"

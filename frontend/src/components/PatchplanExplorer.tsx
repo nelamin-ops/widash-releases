@@ -257,7 +257,8 @@ function ExplorerOverlay({
           {!tree && treeLoading && (
             <p className="text-sm opacity-60 italic">Loading patchplan…</p>
           )}
-          {tree && (
+          {tree && tree.totalCables === 0 && <PatchplanSetupHint />}
+          {tree && tree.totalCables > 0 && (
             <ExplorerBody
               tree={tree}
               path={path}
@@ -310,6 +311,38 @@ function Breadcrumb({
         );
       })}
     </nav>
+  );
+}
+
+function PatchplanSetupHint() {
+  return (
+    <div className="max-w-2xl mx-auto mt-12 text-sm space-y-4">
+      <h3 className="text-lg font-semibold">No patchplan data yet</h3>
+      <p className="opacity-80">
+        The patchplan view is optional and depends on a local CSV
+        export of your site's master patchplan spreadsheet. If your
+        site doesn't maintain one, you can ignore this section — the
+        rest of WiDash works without it.
+      </p>
+      <div>
+        <p className="opacity-80 mb-1">To enable it:</p>
+        <ol className="list-decimal pl-6 space-y-1 opacity-80">
+          <li>Open your master patchplan in Google Sheets.</li>
+          <li>For each tab: <strong>File → Download → CSV</strong>.</li>
+          <li>
+            Drop the CSVs into{" "}
+            <code className="font-mono surface-1 px-1.5 py-0.5 rounded">
+              ~/.widash/patchplan/
+            </code>
+            .
+          </li>
+          <li>Hit <strong>Refresh</strong> above.</li>
+        </ol>
+      </div>
+      <p className="opacity-60 text-xs">
+        Files stay local — nothing is uploaded.
+      </p>
+    </div>
   );
 }
 
