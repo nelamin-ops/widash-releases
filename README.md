@@ -251,80 +251,60 @@ a case's recent comments without leaving the dashboard.
                         │  CoolanClient ─► Coolan        │
                         │  PatchplanSource ─► CSVs       │
                         │  MomClient ─► mom.dmz / Argus  │
+                        │  ChatBackend ─► SF LLM Gateway │
                         └────────────────────────────────┘
 ```
 
-- **Auth**: backend reads the SF session from `sf org display` on
-  every request (cached briefly). When the token rotates, the
-  per-report `GusClient` cache is dropped.
+- **Auth**: SF session comes from the local sf-CLI; Coolan and
+  mom.dmz auth live under `~/.widash/*.json` (chmod 600). Nothing
+  is stored server-side.
 - **Per-report clients**: a separate `GusClient` instance per report
-  id keeps caches isolated. Multi-region requests fan out and merge
-  buckets / events.
-- **TTL caching** for active rmas / detail / activity (10s),
-  case detail + feed (10s), per-uuid Coolan components (TtlCache
-  default 30s). Manual refresh + 15s dashboard poll keep things
-  fresh.
+  id keeps caches isolated. Multi-region requests fan out per
+  report and merge buckets / events / activity.
+- **TTL caching** smooths the SOQL load — see the cache decorators
+  in each backend module for the live values; tweak with both the
+  poll interval and the TTL in mind so polls don't always hit
+  stale data.
 - **Coolan components** include curated attribute lists per asset
   type (see `_ATTR_KEYS_BY_ASSET` in `backend/coolan_client.py`).
 - **Patchplan** indexes by lowercase hostname and by (room, rack)
   with prefix-zero normalisation so GUS' `E04` matches the sheet's
   `e4`. See `backend/patchplan.py`.
 
-## Files
+## Code map
 
-```
-backend/
-  main.py            FastAPI app, all REST endpoints
-  gus_client.py      Salesforce report parsing, status colours, activity log
-  case_detail.py     Per-case detail builder (Case + Tech_Asset, picklists, lookups)
-  coolan_client.py   Coolan GraphQL client (machines, components, attributes,
-                       rack-server lookup, temperature snapshot)
-  coolan_browser.py  Headless SSO via Playwright
-  coolan_auth.py     Persistent Coolan auth file
-  mom_client.py      mom.dmz client: ES topology + Argus temps + Coolan join
-  mom_auth.py        Persistent mom.dmz cookie file
-  patchplan.py       Master patchplan source/index/cache
-  sf_session.py      sf-CLI session reader with retry
-  cache.py           In-memory TTL cache
-  models.py          Pydantic types shared between layers
+A condensed pointer list — read the files for the full picture.
 
-frontend/src/
-  App.tsx                      Top-level shell, polling, settings modal wire-up
-  api.ts                       All HTTP calls. apiFetch attaches X-Report-Id
-  statusColors.ts              FRA-style colour map for non-active statuses
-  assetPath.ts                 Asset-path / U-position formatting
-  components/
-    DonutCard.tsx              Active RMA donut + center stack
-    LegendCard.tsx             RTS today / mine open / mine closed pills
-    DetailsTable.tsx           Per-status ticket list with column manager
-    ActivityLog.tsx            Status changes + comments with all the filters
-    CaseDetailSheet.tsx        The big bottom sheet
-    CaseTabsBar.tsx            Minimised case-tab pills
-    ChatterPanel.tsx           Right-hand chatter / case-comments / email column
-    PatchplanExplorer.tsx      Floating bubble + room/rack drilldown
-    TempsExplorer.tsx          🌡 overlay: rooms → racks → devices → chart/snapshot
-    MomStatusPill.tsx          Header pill for the mom.dmz cookie
-    RegionSettingsModal.tsx    First-run + gear modal
-    TextTooltip.tsx            Draggable / resizable tooltips
-    EditConfirmModal.tsx       Diff confirm before SF write
-    sheetSections.ts           Mock sections used until live detail arrives
-    sheetChatter.ts            Mock chatter (rare fallback)
-  hooks/
-    useCaseSheets.ts           Per-tab persistence + tabsPinned global
-    useFontSize.ts             S/M/L scale via html font-size
-    useLanguage.ts             EN/DE translations + locale helpers
-    useTheme.ts                Light/dark
-    useTooltips.ts             openText / openLinks / openKv tooltip stack
-    useSectionEdits.ts         Per-section draft store + diff
-    useColumnConfig.ts         Generic + DetailsTable-specific column config
-    useTabRefocus.ts           Reload when the tab regains focus after >30s
-    usePolling.ts              Visibility-aware periodic poll
-    useWriteMode.ts            Global Writes pill state
-    useSort.ts                 Generic sort
+**Backend (`backend/`):**
+- `main.py` — FastAPI app, every REST endpoint.
+- `gus_client.py` — SF report parsing, `SITE_REPORTS`, status
+  colours, activity log SOQL.
+- `case_detail.py` — Per-case detail builder (Case + Tech_Asset,
+  picklists, lookups). Where new SF write paths go.
+- `coolan_client.py` — Coolan GraphQL (machines, components,
+  rack-server lookup, temperature snapshot).
+- `mom_client.py` — mom.dmz: Elasticsearch topology + Argus temps
+  + Coolan rack-server join.
+- `patchplan.py` — Master patchplan source/index/cache.
+- `chat.py` — AI chat sidebar backend: tool definitions + LLM
+  streaming via the SF LLM gateway.
+- `update_check.py` — Polls `widash-releases` for newer tags.
 
-patchplan/                     CSVs exported from the master Google Sheet
-  *.csv                        (gitignored — local data only)
-```
+**Frontend (`frontend/src/`):**
+- `App.tsx` — Top-level shell, polling, settings modal wire-up.
+- `api.ts` — All HTTP calls. **Always use `apiFetch` for `/api/...`**
+  so `X-Report-Id` is attached.
+- `components/` — Each major UI block lives in its own file
+  (Header, ActivityLog, CaseDetailSheet, ChatSidebar, …).
+- `hooks/` — Reusable state + behaviour (useWriteMode, useLanguage,
+  usePolling, useTooltips, …).
+- `statusColors.ts` — Colour map for non-active statuses. **Must
+  stay in sync with `STATUS_COLORS` in `backend/gus_client.py`.**
+
+**Local data (gitignored):**
+- `~/.widash/patchplan/*.csv` — patchplan CSVs.
+- `~/.widash/coolan_auth.json`, `~/.widash/mom_auth.json` — auth
+  files (chmod 600).
 
 ## What's deliberately not built
 
@@ -346,13 +326,12 @@ patchplan/                     CSVs exported from the master Google Sheet
   and they're vetoed when the user has unsaved drafts / open confirm
   modal / in-flight save.
 - **Region scoping**: anything that runs SOQL across cases must
-  derive its site set from the active report (`_report_site_codes`)
-  rather than hardcoded `FRA1/2/3`. Same for activity log
-  CaseHistory queries.
+  derive its site set from the active report
+  (`_report_site_codes`) rather than from a hardcoded list. Same
+  for activity log CaseHistory queries.
 - **Don't hardcode column letters in CSV parsers.** The master
   patchplan has 30/31/32/33-column variants; `_parse_csv` finds
   columns by header name.
-```
 
 ## When the SF token rotates
 
