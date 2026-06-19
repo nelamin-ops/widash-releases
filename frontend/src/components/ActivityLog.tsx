@@ -44,6 +44,26 @@ interface ActivityLogProps {
 const WORK_HOUR_START = 9;
 const WORK_HOUR_END = 17;
 
+// Site → IANA timezone. Allow-list: any code not listed falls back to
+// the engineer's browser timezone, which is the safe default before
+// the rollout site is confirmed.
+const SITE_TIMEZONES: Record<string, string> = {
+  FRA: "Europe/Berlin",
+  CDG: "Europe/Paris", PAR: "Europe/Paris",
+  AMS: "Europe/Amsterdam",
+  LON: "Europe/London", LHR: "Europe/London",
+  IAD: "America/New_York", DCA: "America/New_York", WAS: "America/New_York",
+  ORD: "America/Chicago", CHI: "America/Chicago",
+  NRT: "Asia/Tokyo", KIX: "Asia/Tokyo", TKY: "Asia/Tokyo",
+  SYD: "Australia/Sydney",
+};
+
+function siteTimeZone(site: string | undefined): string | undefined {
+  if (!site) return undefined;
+  const prefix = site.slice(0, 3).toUpperCase();
+  return SITE_TIMEZONES[prefix];
+}
+
 function formatDateTime(iso: string, locale: string): string {
   const d = new Date(iso);
   return d.toLocaleString(locale, {
@@ -52,11 +72,25 @@ function formatDateTime(iso: string, locale: string): string {
   });
 }
 
-function isOutsideWorkHours(iso: string): boolean {
+// Read hour + weekday in the site's timezone via Intl.DateTimeFormat,
+// so a 14:00 JST event in a Tokyo case looks "in hours" even if the
+// user opening the dashboard is in Frankfurt.
+function partsInZone(iso: string, tz: string | undefined): { hour: number; weekday: number } {
   const d = new Date(iso);
-  const day = d.getDay();
-  if (day === 0 || day === 6) return true;
-  const hour = d.getHours();
+  if (!tz) return { hour: d.getHours(), weekday: d.getDay() };
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour: "2-digit", weekday: "short", hour12: false,
+  });
+  const parts = fmt.formatToParts(d);
+  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
+  const wd = parts.find((p) => p.type === "weekday")?.value ?? "Sun";
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(wd);
+  return { hour, weekday };
+}
+
+function isOutsideWorkHours(iso: string, site: string | undefined): boolean {
+  const { hour, weekday } = partsInZone(iso, siteTimeZone(site));
+  if (weekday === 0 || weekday === 6) return true;
   return hour < WORK_HOUR_START || hour >= WORK_HOUR_END;
 }
 
@@ -204,7 +238,7 @@ export function ActivityLog({
   }
 
   const renderCell = (col: ActivityColumnDef, e: ActivityEvent) => {
-    const outside = isOutsideWorkHours(e.timestamp);
+    const outside = isOutsideWorkHours(e.timestamp, e.location);
     const isNewCase = e.type === "status_change" && e.toStatus === "New";
     const mentionsMe = !!e.mentionsMe;
 
@@ -514,7 +548,7 @@ export function ActivityLog({
           </thead>
           <tbody>
             {sorted.map((e) => {
-              const outside = isOutsideWorkHours(e.timestamp);
+              const outside = isOutsideWorkHours(e.timestamp, e.location);
               return (
                 <tr
                   key={e.id}
