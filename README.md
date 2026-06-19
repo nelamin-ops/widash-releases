@@ -109,10 +109,17 @@ cd frontend && bun run test                              # frontend
   (auto-derived from your SF session), by status pills, free-text
   comment search, and ticket-id search. Bot toggle hides
   service-account noise. Column visibility + order is persistent per
-  browser via the gear icon.
+  browser via the gear icon. Outside-hours events (⏰) are scored
+  in the *site's* timezone, not the engineer's, so a 14:00 JST
+  event in a Tokyo case stays in-hours when a Frankfurt user
+  reviews it overnight.
 - **Background polling**: dashboard auto-refreshes every 15s so
   status changes from colleagues / GUS itself propagate without a
   manual reload. Pauses when the tab is hidden.
+- **Update banner**: yellow banner appears at the top of the
+  dashboard when a newer release is on `widash-releases`. Shows
+  current + latest version + a Release Notes link. Run
+  `./update.sh` to take the new version.
 
 ### Case sheet
 Bottom sheet that opens when you click a ticket. Up to one open at a
@@ -120,7 +127,7 @@ time; the others minimise into a draggable tab bar (horizontal
 scroll, optional pin to dock above the open sheet).
 
 - **Header**: case number · asset path with U-position
-  (`FRA3-14.1-124-E04-HU14`) · status pill (clickable, dropdown of
+  (e.g. `FRA3-14.1-124-E04-HU14`) · status pill (clickable, dropdown of
   the 11 RMA statuses) · Coolan reporting state · Case category /
   subcategory (cascading) / resolution picker pills · live `LIVE`
   badge when the latest detail is in.
@@ -128,7 +135,9 @@ scroll, optional pin to dock above the open sheet).
   Responsible parties (case owner, team, ICO/IDO, …), Datacenter &
   routing, Classification, Workflow, Times. Plus the full asset
   record. Per-section edit mode → diff confirm modal → write through
-  guarded by the global Writes pill.
+  guarded by the global ✎ **Writes-mode pill** in the header
+  (default off, turns red when armed). Edit buttons are disabled
+  until you flip it.
 - **Coolan components** with curated attributes per asset type
   (DRIVE / MEMORY / PSU / FAN / etc.). Click a component → tooltip
   with the details (Vendor, Serial, Capacity, Slot, SMART status, …)
@@ -154,12 +163,16 @@ Floating 🔌 bubble bottom-right opens a full-screen explorer.
 - Default hides rooms with <50 cable references (data-quality
   leftovers); "Show all" toggle surfaces them.
 - Source: local CSV files exported from the master patchplan Google
-  Sheet, dropped into `<repo>/patchplan/`. Backend polls the
+  Sheet, dropped into `~/.widash/patchplan/`. Backend polls the
   directory every 3 minutes and only re-parses on file changes
   (mtime+size hash). To refresh: re-download tabs as CSV from
   Google Sheets. The `LocalCsvSource` is one implementation behind
   a `PatchplanSource` interface; a future Sheets-API or shared-link
   source slots in without touching the UI.
+- When the directory is empty (e.g. sites without a master
+  patchplan), the explorer modal shows a setup hint instead of an
+  empty tree, and the Connections section in the case sheet hides
+  itself.
 
 ### Rack temperatures
 Floating 🌡 bubble bottom-right opens a rooms → racks → devices
@@ -192,12 +205,31 @@ overlay backed by mom.dmz internal APIs.
 ### Settings & multi-region
 - Gear icon top-left of the location pills opens the **Region
   settings** modal. Add multiple report ids to merge data across
-  regions (Frankfurt + Paris + …); each region's site pills appear
-  alongside each other in the header.
+  regions (e.g. Frankfurt + Paris); each region's site pills appear
+  alongside each other in the header. Backend fans the SOQL out
+  per region in parallel and merges buckets / activity events.
 - Auto-detect picks your region from your recent SF activity. New
   regions get added by editing `SITE_REPORTS` in
   `backend/gus_client.py` — once a report id is registered there,
   every engineer in that region picks it up on next reload.
+
+### AI chat sidebar
+Floating chat sidebar (slides in from the right) backed by Salesforce's
+internal LLM gateway. Read-only assistant — no data is persisted across
+reloads, no writes are issued. Claude (Sonnet 4.6 / Opus 4.7
+selectable) has access to a curated tool set scoped to the active
+report:
+
+- `list_rmas` / `list_status_tickets` — count and list cases.
+- `get_case` — full case detail (Identification, Workflow, asset).
+- `recent_activity` — same activity events the dashboard shows.
+- `temps_overview` / `temps_rack` — mom.dmz live temperatures.
+- `coolan_components` — component health for a case.
+- `patchplan_search` — cable lookup by hostname / room+rack / query.
+
+Useful for "what's the highest-priority RMA in pending drain right
+now", "what's room 14.4 looking like temperature-wise", or summarising
+a case's recent comments without leaving the dashboard.
 
 ### UX polish
 - Light + dark theme toggle, three font-size steps, EN / DE.
