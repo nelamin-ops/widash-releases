@@ -216,18 +216,50 @@ overlay backed by mom.dmz internal APIs.
   every engineer in that region picks it up on next reload.
 
 ### AI chat sidebar
-Floating chat sidebar (slides in from the right) backed by Salesforce's
-internal LLM gateway. Read-only assistant — no data is persisted across
-reloads, no writes are issued. Claude (Sonnet 4.6 / Opus 4.7
-selectable) has access to a curated tool set scoped to the active
-report:
+Dockable chat panel (slides in from the left, resizable via the right
+edge) backed by Salesforce's internal LLM gateway. Read-only assistant —
+no writes are issued, no data is sent server-side. Claude (Sonnet 4.6 /
+Opus 4.7 selectable) has access to a curated tool set scoped to the
+active report:
 
-- `list_rmas` / `list_status_tickets` — count and list cases.
+- `list_rmas` / `list_status_tickets` — count and list cases. Tickets
+  carry pre-rendered `caseLink` Markdown so every cited case-number
+  ends up clickable in the reply.
 - `get_case` — full case detail (Identification, Workflow, asset).
+  Accepts either the bare 8-digit case number OR the SF 15/18-char id;
+  the bare number is what engineers actually cite.
 - `recent_activity` — same activity events the dashboard shows.
 - `temps_overview` / `temps_rack` — mom.dmz live temperatures.
 - `coolan_components` — component health for a case.
 - `patchplan_search` — cable lookup by hostname / room+rack / query.
+
+**Rendering.** Replies are rendered as GitHub-Flavored Markdown
+(`react-markdown` + `remark-gfm`): tables, lists, fenced code blocks,
+inline `code`. The default `urlTransform` is overridden to allow
+`widash://` alongside `http(s)://` and reject everything else, so a
+prompt-injected `javascript:` / `data:` / `file:` URL can't smuggle
+code in.
+
+**Clickable in-app links.** The system prompt instructs Claude to wrap
+every identifier it mentions in one of five custom URL schemes; each
+parses through a strict regex before the click is dispatched to the
+corresponding in-app action:
+
+| Scheme | Action |
+|---|---|
+| `widash://case/<8-digit>` | opens the case sheet (active bucket → activity log → backend lookup fallback for closed / drained / RTS cases) |
+| `widash://rack/<site>/<rack>` | opens the temperatures overlay focused on the rack |
+| `widash://room/<site>/<room>` | opens the temperatures overlay for the site |
+| `widash://hostname/<host>` | resolves the hostname via `/api/lookup/case_by_identifier` → opens the case |
+| `widash://serial/<sn>` | same idea via serial number |
+
+**Persisted conversations.** Up to 30 past conversations are kept in
+`localStorage` so closing the panel (×) only minimises, and a full page
+reload restores the active thread. The header shows the title of the
+current conversation (derived from its first user message), with
+a chevron that expands a history list — pick another conversation,
+start a fresh one with **+**, or delete a single conversation from the
+list. The trash icon clears only the *active* conversation.
 
 Useful for "what's the highest-priority RMA in pending drain right
 now", "what's room 14.4 looking like temperature-wise", or summarising
