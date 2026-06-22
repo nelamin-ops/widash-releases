@@ -33,7 +33,9 @@ sf org login web    # opens browser for SF login
 
 `./install.sh` is idempotent — re-run it after a `git pull` and it
 just refreshes deps. `./start.sh` kills any stale uvicorn / vite from
-a previous run before booting fresh ones.
+a previous run before booting fresh ones. To shut WiDash down later,
+run `./stop.sh` — it frees ports 8000 and 5173 and is safe to run
+when nothing is up.
 
 On first launch the **Region settings** modal opens automatically.
 WiDash auto-detects your region from your last 90 days of edited
