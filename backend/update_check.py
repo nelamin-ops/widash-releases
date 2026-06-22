@@ -51,36 +51,69 @@ def get_update_info() -> dict:
 
 
 def _fetch_latest() -> dict:
+    # Try the Releases API first — gives us real release notes if
+    # `gh release create` was run. Fall back to plain Git tags when no
+    # GitHub Release object exists yet, so a tag-only push still
+    # surfaces the update banner.
     base = {
         "current": __version__,
         "latest": __version__,
-        "url": f"https://github.com/{RELEASES_REPO}/releases/latest",
+        "url": f"https://github.com/{RELEASES_REPO}/releases",
         "update_available": False,
     }
     try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{RELEASES_REPO}/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
-            timeout=5.0,
-            follow_redirects=True,
-        )
-        if resp.status_code == 404:
-            # No releases published yet — not an error.
-            return base
-        resp.raise_for_status()
-        data = resp.json()
-        tag: str = data.get("tag_name", "")
-        html_url: str = data.get("html_url", base["url"])
+        tag, html_url = _try_releases_endpoint() or _try_tags_endpoint() or (None, None)
         if not tag:
             return base
         latest_ver = tag.lstrip("v")
-        update_available = _parse_version(tag) > _parse_version(__version__)
         return {
             "current": __version__,
             "latest": latest_ver,
-            "url": html_url,
-            "update_available": update_available,
+            "url": html_url or base["url"],
+            "update_available": _parse_version(tag) > _parse_version(__version__),
         }
     except Exception:
         logger.debug("update check failed", exc_info=True)
         return base
+
+
+def _try_releases_endpoint() -> Optional[tuple[str, str]]:
+    """Return (tag, html_url) from GitHub's Releases API, or None."""
+    resp = httpx.get(
+        f"https://api.github.com/repos/{RELEASES_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=5.0,
+        follow_redirects=True,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    data = resp.json()
+    tag = data.get("tag_name") or ""
+    if not tag:
+        return None
+    return tag, data.get("html_url") or ""
+
+
+def _try_tags_endpoint() -> Optional[tuple[str, str]]:
+    """Fallback: highest semver-ish tag on the release repo."""
+    resp = httpx.get(
+        f"https://api.github.com/repos/{RELEASES_REPO}/tags",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=5.0,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    tags = resp.json() or []
+    if not tags:
+        return None
+    # Pick the highest by numeric version, not by API order (the API
+    # sorts by creation time, which is usually right but not guaranteed).
+    best = max(
+        (t.get("name", "") for t in tags if t.get("name")),
+        key=_parse_version,
+        default="",
+    )
+    if not best:
+        return None
+    return best, f"https://github.com/{RELEASES_REPO}/releases/tag/{best}"
