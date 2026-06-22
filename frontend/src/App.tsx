@@ -32,6 +32,7 @@ import {
   fetchActive, fetchActivity, fetchDetails, fetchMe,
   refresh as apiRefresh, type MeResponse,
   getActiveReportIds, setActiveReportIds,
+  lookupCaseByIdentifier,
 } from "./api";
 import { colorForStatus } from "./statusColors";
 import type {
@@ -482,7 +483,83 @@ export default function App() {
 
       <PatchplanExplorer />
       <TempsExplorer sites={[...(active?.sites ?? [])]} />
-      <ChatSidebar />
+      <ChatSidebar
+        onOpenCaseNumber={async (caseNumber) => {
+          // Chat replies cite cases by their bare number ("91628797");
+          // the case-detail tabs key off the Salesforce 15-char id. Try
+          // the cheapest hits first (already-loaded ticket lists, then
+          // activity log) and finally ask the backend to look it up
+          // directly so cases that rolled out of the 14-day window or
+          // sit in a closed bucket still open.
+          const inSelected = selectedTickets.find((tk) => tk.name === caseNumber);
+          if (inSelected) { handleOpenTicket(inSelected); return; }
+          const ev = events.find((e) => e.ticketId === caseNumber);
+          if (ev) {
+            handleOpenFromActivity(ev.ticketSfId, ev.caseStatus);
+            // handleOpenFromActivity bails on non-bucket cases; fall
+            // through to the backend lookup if that happens.
+            if (active?.buckets.some((b) => b.status === ev.caseStatus)) return;
+          }
+          try {
+            const hit = await lookupCaseByIdentifier("case_number", caseNumber);
+            if (!hit) return;
+            // Open with a stub ticket — CaseDetailSheet fetches the
+            // full detail itself via fetchCaseDetail(id), so we only
+            // need an id + a display name to mount the sheet.
+            const stub: RmaTicket = {
+              id: hit.caseSfId,
+              name: hit.caseNumber || caseNumber,
+              status: hit.status,
+            } as RmaTicket;
+            const bucket = active?.buckets.find((b) => b.status === hit.status);
+            caseSheets.open(stub, {
+              status: hit.status,
+              statusColor: bucket?.color ?? colorForStatus(hit.status),
+            });
+          } catch { /* ignore — user can retry */ }
+        }}
+        onOpenRack={(site, rack) => {
+          // TempsExplorer listens on the window for this event so we
+          // don't have to thread a ref through. The site must be in
+          // the active report's site list, otherwise the explorer
+          // silently falls back to the first available site.
+          window.dispatchEvent(new CustomEvent("widash:open-temps", {
+            detail: { site, rack },
+          }));
+        }}
+        onOpenRoom={(site, _room) => {
+          // Rooms-as-deep-link aren't implemented in TempsExplorer yet;
+          // open the overview for the right site at least so the
+          // engineer can scroll to the right room without losing
+          // their place. Pass no rack so the overview is shown.
+          window.dispatchEvent(new CustomEvent("widash:open-temps", {
+            detail: { site },
+          }));
+        }}
+        onOpenIdentifier={async (kind, value) => {
+          // Hostname / serial resolution goes through the backend
+          // because the live ticket list only carries serials, not
+          // hostnames. 404 silently no-ops — chat reply is
+          // self-explanatory in that case.
+          try {
+            const hit = await lookupCaseByIdentifier(kind, value);
+            if (!hit) return;
+            const inSelected = selectedTickets.find((tk) => tk.id === hit.caseSfId);
+            if (inSelected) { handleOpenTicket(inSelected); return; }
+            // Open via stub so closed / RTS cases still surface.
+            const stub: RmaTicket = {
+              id: hit.caseSfId,
+              name: hit.caseNumber,
+              status: hit.status,
+            } as RmaTicket;
+            const bucket = active?.buckets.find((b) => b.status === hit.status);
+            caseSheets.open(stub, {
+              status: hit.status,
+              statusColor: bucket?.color ?? colorForStatus(hit.status),
+            });
+          } catch { /* ignore — user can retry */ }
+        }}
+      />
     </div>
   );
 }

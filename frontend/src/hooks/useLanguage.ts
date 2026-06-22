@@ -276,6 +276,12 @@ const dict = {
     "chat.model": "Model",
     "chat.enterHint": "Enter to send · Shift+Enter for newline",
     "chat.toolRunning": "Looking up",
+    "chat.resize": "Drag to resize",
+    "chat.history": "Conversations",
+    "chat.historyEmpty": "No saved conversations yet.",
+    "chat.newConversation": "New conversation",
+    "chat.deleteConversation": "Delete conversation",
+    "chat.minimize": "Minimize (conversations stay saved)",
   },
   de: {
     "header.locationFilter": "Standort-Filter",
@@ -545,6 +551,12 @@ const dict = {
     "chat.model": "Modell",
     "chat.enterHint": "Enter zum Senden · Shift+Enter für Zeilenumbruch",
     "chat.toolRunning": "Schlage nach",
+    "chat.resize": "Breite ziehen",
+    "chat.history": "Unterhaltungen",
+    "chat.historyEmpty": "Noch keine gespeicherten Unterhaltungen.",
+    "chat.newConversation": "Neue Unterhaltung",
+    "chat.deleteConversation": "Unterhaltung löschen",
+    "chat.minimize": "Minimieren (Unterhaltungen bleiben gespeichert)",
   },
 } as const;
 

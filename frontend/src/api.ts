@@ -114,6 +114,28 @@ export function fetchCaseDetail(caseId: string): Promise<CaseDetailResponse> {
     .then(handle<CaseDetailResponse>);
 }
 
+export interface CaseLookupResult {
+  caseSfId: string;
+  caseNumber: string;
+  status: string;
+  reportId: string;
+}
+
+/** Resolve a hostname / serial number / case number to a Case in
+ *  Salesforce. Used by the chat sidebar to make assistant-cited
+ *  identifiers clickable. Returns null on 404 — caller decides what
+ *  to do (typically a toast / open the asset's GUS page externally). */
+export async function lookupCaseByIdentifier(
+  kind: "hostname" | "serial" | "case_number", value: string,
+): Promise<CaseLookupResult | null> {
+  const r = await apiFetch(
+    `/api/lookup/case_by_identifier?kind=${encodeURIComponent(kind)}`
+    + `&value=${encodeURIComponent(value)}`,
+  );
+  if (r.status === 404) return null;
+  return handle<CaseLookupResult>(r);
+}
+
 export interface WriteChange {
   apiName: string;
   value: string | number | boolean | null;

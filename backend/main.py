@@ -1287,6 +1287,127 @@ def lookup_search(
     }
 
 
+# Allow-listed lookup kinds for /api/lookup/case_by_identifier.
+# Each kind binds a strict regex for the user-supplied value, plus the
+# Tech_Asset__c field(s) we'll match it against. SOQL has no parameter
+# binding, so the regex IS the injection defence — never relax it.
+_LOOKUP_KINDS: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
+    # Fully-qualified host or short name. Allows letters, digits,
+    # hyphens, dots; no spaces, quotes, percent signs, etc.
+    "hostname": (
+        re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{1,79}$"),
+        ("Device_Name__c", "Discovered_Host_Name__c"),
+    ),
+    # Serial / asset tag. Salesforce serials are 4-32 alphanumeric +
+    # optional dash; tighter than hostname so we don't accidentally
+    # match a hostname-shaped string.
+    "serial": (
+        re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{3,31}$"),
+        ("Tech_Ops_Serial_Number__c",),
+    ),
+    # Bare GUS case number (the 8-digit value engineers cite, NOT the
+    # Salesforce 15-char id). Handled separately because it queries
+    # Case directly instead of going via Tech_Asset__c.
+    "case_number": (
+        re.compile(r"^[0-9]{6,12}$"),
+        ("CaseNumber",),
+    ),
+}
+
+
+@app.get("/api/lookup/case_by_identifier")
+def lookup_case_by_identifier(
+    kind: str = Query(..., max_length=20),
+    value: str = Query(..., max_length=120),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    """Find an open RMA case in the active report(s) by hostname or
+    serial number. Used by the chat sidebar to make Claude-cited
+    identifiers clickable.
+
+    Allow-listed kinds (hostname / serial) with strict per-kind regex
+    on ``value``. Search is scoped to the case ids in the active
+    report — we never broaden to all of Salesforce — so a hit means
+    "this engineer can open it in WiDash right now".
+    """
+    spec = _LOOKUP_KINDS.get(kind)
+    if spec is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_kind",
+                     "message": f"kind must be one of {list(_LOOKUP_KINDS)}"},
+        )
+    value_re, fields = spec
+    v = (value or "").strip()
+    if not value_re.match(v):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_value", "message": "value failed validation"},
+        )
+
+    safe_v = v.replace("\\", "\\\\").replace("'", "\\'")
+
+    for client in clients:
+        sf = client._sf
+        if sf is None:
+            continue
+        try:
+            if kind == "case_number":
+                # Direct case lookup. We deliberately don't scope to the
+                # active report's case ids — the chat may cite a case
+                # that recently rolled out of the 14-day window. The
+                # CaseNumber regex guarantees the input is safe.
+                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
+                case_rows = sf.query(
+                    f"SELECT Id, CaseNumber, Status FROM Case "
+                    f"WHERE ({field_clauses}) "
+                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
+                ).get("records", [])
+            else:
+                # Hostname / serial: resolve via Tech_Asset__c, then
+                # filter to the active report's cases so we only ever
+                # return a case the engineer can open in the UI.
+                try:
+                    ticket_ids = client._query_active_case_ids()
+                except SalesforceError:
+                    logger.exception("active case ids fetch failed in lookup")
+                    continue
+                if not ticket_ids:
+                    continue
+                ids_clause = ",".join(f"'{tid}'" for tid in ticket_ids)
+                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
+                asset_rows = sf.query(
+                    f"SELECT Id FROM Tech_Asset__c "
+                    f"WHERE ({field_clauses}) LIMIT 5"
+                ).get("records", [])
+                if not asset_rows:
+                    continue
+                asset_ids_clause = ",".join(f"'{r['Id']}'" for r in asset_rows)
+                case_rows = sf.query(
+                    f"SELECT Id, CaseNumber, Status FROM Case "
+                    f"WHERE Id IN ({ids_clause}) "
+                    f"AND FK_Tech_Asset__c IN ({asset_ids_clause}) "
+                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
+                ).get("records", [])
+        except SalesforceError:
+            logger.exception("Case lookup failed (kind=%s)", kind)
+            continue
+        if case_rows:
+            row = case_rows[0]
+            return {
+                "caseSfId": row["Id"],
+                "caseNumber": row.get("CaseNumber") or "",
+                "status": row.get("Status") or "",
+                "reportId": client._report_id,
+            }
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": "not_found",
+                 "message": f"No active case matches {kind}={v!r}."},
+    )
+
+
 _avatar_cache: dict[str, tuple[float, bytes, str]] = {}
 _AVATAR_TTL = 3600.0  # seconds
 

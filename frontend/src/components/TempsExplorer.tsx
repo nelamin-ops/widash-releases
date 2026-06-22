@@ -75,6 +75,52 @@ export function TempsExplorer({ sites }: TempsExplorerProps) {
     if (!sites.includes(site)) setSite(sites[0]);
   }, [sites, site]);
 
+  // External open trigger — the chat sidebar dispatches
+  // `widash:open-temps` when the user clicks a rack/room link in an
+  // assistant reply. Site / rack / room are pre-selected; the overview
+  // fetch effect above takes over from there.
+  useEffect(() => {
+    function onOpenTemps(ev: Event) {
+      const ce = ev as CustomEvent<{
+        site?: string; rack?: string;
+      }>;
+      const detail = ce.detail ?? {};
+      const wantSite = (detail.site || "").trim();
+      const wantRack = (detail.rack || "").trim();
+      if (wantSite && sites.includes(wantSite)) setSite(wantSite);
+      // Clear any open detail-chart so we land on the overview/rack view.
+      setDetail(null);
+      if (wantRack) {
+        // We don't know the rack's fullValue without an overview; stash
+        // a label-only stub and let the overview-arrival effect upgrade
+        // it once the data lands.
+        setActiveRack({ fullValue: wantRack, label: wantRack } as TempsRack);
+      } else {
+        setActiveRack(null);
+      }
+      setOpen(true);
+    }
+    window.addEventListener("widash:open-temps", onOpenTemps as EventListener);
+    return () => window.removeEventListener("widash:open-temps", onOpenTemps as EventListener);
+  }, [sites]);
+
+  // When the overview arrives after an external trigger, upgrade the
+  // rack stub to the real TempsRack (with the correct fullValue) so
+  // the rack-devices fetch can run.
+  useEffect(() => {
+    if (!overview || !activeRack) return;
+    if (activeRack.fullValue !== activeRack.label) return;  // already real
+    const target = activeRack.label.toLowerCase();
+    for (const room of overview.rooms ?? []) {
+      const hit = (room.racks ?? []).find(
+        (r) => r.label.toLowerCase() === target
+          || r.fullValue.toLowerCase().endsWith(`- ${target}`)
+          || r.fullValue.toLowerCase().endsWith(target),
+      );
+      if (hit) { setActiveRack(hit); return; }
+    }
+  }, [overview, activeRack]);
+
   // Fetch overview when the overlay opens or the site changes.
   useEffect(() => {
     if (!open || !site) return;
