@@ -67,6 +67,125 @@ const ACTIVE_ID_STORAGE_KEY = "widash.chat.activeId";
 // bottom of the list get evicted FIFO so the localStorage payload
 // doesn't grow without limit (every entry can be tens of KB).
 const MAX_CONVERSATIONS = 30;
+// Day-by-day token usage tally, persisted locally. Counts only the
+// chats the user runs in WiDash — DevBar already shows the global
+// figure across every Claude integration, so this gives the user a
+// scoped "what did THIS app cost me today / this month" reading.
+// Map shape: { "YYYY-MM-DD": {input, output}, … }.
+const USAGE_STORAGE_KEY = "widash.chat.usageByDay";
+// Don't keep tallies beyond a year — we only ever display today and
+// the current month, anything older is dead weight.
+const USAGE_RETENTION_DAYS = 400;
+
+type DayKey = string;  // "YYYY-MM-DD"
+/** Per-day tally, broken out by model so we can multiply by the
+ *  right rate to get a dollar figure. Old single-bucket entries
+ *  from before this split are migrated into the Sonnet slot on
+ *  load, because Sonnet is (and always was) the default model. */
+interface UsageBucket { input: number; output: number }
+interface DayUsage {
+  byModel: Record<Model, UsageBucket>;
+}
+type UsageByDay = Record<DayKey, DayUsage>;
+
+// Anthropic public Claude pricing (USD per 1,000,000 tokens). Source:
+// claude.com/pricing — Sonnet 4.6 / Opus 4.7 standard rates as of
+// 2026-06. The SF Express LLM Gateway is a transparent passthrough,
+// so cost attribution lines up 1:1. If Anthropic changes pricing,
+// update these constants in the same commit.
+const PRICING: Record<Model, { inPerM: number; outPerM: number }> = {
+  "claude-sonnet-4-6": { inPerM: 3.00, outPerM: 15.00 },
+  "claude-opus-4-7":   { inPerM: 15.00, outPerM: 75.00 },
+};
+
+function emptyDay(): DayUsage {
+  return {
+    byModel: {
+      "claude-sonnet-4-6": { input: 0, output: 0 },
+      "claude-opus-4-7":   { input: 0, output: 0 },
+    },
+  };
+}
+
+function costFor(b: UsageBucket, m: Model): number {
+  const p = PRICING[m];
+  return (b.input * p.inPerM + b.output * p.outPerM) / 1_000_000;
+}
+
+function dayCost(d: DayUsage): number {
+  let sum = 0;
+  for (const m of ALLOWED_MODELS) sum += costFor(d.byModel[m], m);
+  return sum;
+}
+
+function dayTokens(d: DayUsage): number {
+  let sum = 0;
+  for (const m of ALLOWED_MODELS) sum += d.byModel[m].input + d.byModel[m].output;
+  return sum;
+}
+
+function formatCost(usd: number): string {
+  if (usd < 0.01) return "$0.00";
+  if (usd < 10) return `$${usd.toFixed(2)}`;
+  if (usd < 100) return `$${usd.toFixed(1)}`;
+  return `$${Math.round(usd)}`;
+}
+
+function todayKey(d: Date = new Date()): DayKey {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function loadUsage(): UsageByDay {
+  try {
+    const raw = localStorage.getItem(USAGE_STORAGE_KEY);
+    if (!raw) return {};
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return {};
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - USAGE_RETENTION_DAYS);
+    const cutoffKey = todayKey(cutoff);
+    const out: UsageByDay = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (k < cutoffKey) continue;
+      const day = emptyDay();
+      // v2 shape: { byModel: { "claude-…": {input, output}, … } }
+      const byModel = (v as any)?.byModel;
+      if (byModel && typeof byModel === "object") {
+        for (const m of ALLOWED_MODELS) {
+          const b = byModel[m];
+          if (b && typeof b.input === "number" && typeof b.output === "number") {
+            day.byModel[m] = { input: b.input, output: b.output };
+          }
+        }
+        out[k] = day;
+        continue;
+      }
+      // v1 shape: { input, output } at the day root. Migrate into
+      // Sonnet's slot — it was the only default model when v1 ran.
+      const flat = v as UsageBucket;
+      if (typeof flat?.input === "number" && typeof flat?.output === "number") {
+        day.byModel[DEFAULT_MODEL] = { input: flat.input, output: flat.output };
+        out[k] = day;
+      }
+    }
+    return out;
+  } catch { return {}; }
+}
+
+function saveUsage(usage: UsageByDay) {
+  try { localStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify(usage)); }
+  catch { /* quota — accept the loss */ }
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 100_000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  if (n < 1_000_000) return Math.round(n / 1000) + "k";
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+}
 
 interface ToolEvent {
   name: string;
@@ -156,6 +275,50 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Last user message we tried to send — surfaced via a Retry button
+  // in the error banner so a transient gateway failure or stale
+  // history doesn't make the user retype their question.
+  const [lastUserText, setLastUserText] = useState<string | null>(null);
+  const [usage, setUsage] = useState<UsageByDay>(() => loadUsage());
+  useEffect(() => { saveUsage(usage); }, [usage]);
+
+  // Compute today's + this-month's totals from the daily buckets.
+  // Recomputes on every render, which is fine — usage is small (one
+  // entry per day, <400 entries) and the math is trivial.
+  const today = todayKey();
+  const monthPrefix = today.slice(0, 7);  // "YYYY-MM"
+  const todayUsage = usage[today];
+  const todayTokens = todayUsage ? dayTokens(todayUsage) : 0;
+  const todayCostUsd = todayUsage ? dayCost(todayUsage) : 0;
+  let monthTokens = 0;
+  let monthCostUsd = 0;
+  for (const [k, v] of Object.entries(usage)) {
+    if (k.startsWith(monthPrefix)) {
+      monthTokens += dayTokens(v);
+      monthCostUsd += dayCost(v);
+    }
+  }
+
+  function recordUsage(modelUsed: Model, input: number, output: number) {
+    if (!input && !output) return;
+    setUsage((prev) => {
+      const k = todayKey();
+      const cur = prev[k] ?? emptyDay();
+      const bucket = cur.byModel[modelUsed];
+      return {
+        ...prev,
+        [k]: {
+          byModel: {
+            ...cur.byModel,
+            [modelUsed]: {
+              input: bucket.input + input,
+              output: bucket.output + output,
+            },
+          },
+        },
+      };
+    });
+  }
   const [model, setModel] = useState<Model>(() => {
     try {
       const v = localStorage.getItem(STORAGE_KEY) as Model | null;
@@ -317,11 +480,37 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
     setError(null);
   }
 
-  async function handleSend() {
-    const text = draft.trim();
+  async function handleRetry() {
+    if (busy || !lastUserText) return;
+    // Drop the trailing user/assistant pair from the failed attempt
+    // so handleSend rebuilds the turn cleanly. The error handler
+    // already pops empty assistant placeholders, but a tool-call
+    // round may have left a half-finished one — drop both kinds.
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== activeId) return c;
+        const msgs = [...c.messages];
+        while (msgs.length > 0) {
+          const last = msgs[msgs.length - 1];
+          if (last.role === "assistant") { msgs.pop(); continue; }
+          if (last.role === "user" && last.content === lastUserText) {
+            msgs.pop();
+          }
+          break;
+        }
+        return { ...c, messages: msgs, updatedAt: Date.now() };
+      }),
+    );
+    setError(null);
+    await handleSend(lastUserText);
+  }
+
+  async function handleSend(overrideText?: string) {
+    const text = (overrideText ?? draft).trim();
     if (!text || busy) return;
     setError(null);
-    setDraft("");
+    setLastUserText(text);
+    if (!overrideText) setDraft("");
 
     // Ensure an active conversation exists — first message in a
     // fresh panel session creates one implicitly.
@@ -339,8 +528,14 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
     const assistantMsg: RenderedMessage = {
       role: "assistant", content: "", streaming: true, tools: [],
     };
+    // Strip empty / whitespace-only bubbles before sending. A stale
+    // aborted assistant placeholder in the persisted history would
+    // otherwise hit the Anthropic API with content=""; the Pydantic
+    // schema now tolerates it but the upstream model still rejects.
     const baseHistory: ChatMessage[] = [
-      ...messages.map(({ role, content }) => ({ role, content })),
+      ...messages
+        .filter((m) => m.content.trim().length > 0)
+        .map(({ role, content }) => ({ role, content })),
       { role: "user", content: text },
     ];
 
@@ -384,9 +579,14 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
       );
     };
 
+    // Pin the model used for THIS request — the dropdown may flip
+    // mid-stream and we want cost attributed to whichever model
+    // the gateway actually ran.
+    const modelUsed: Model = model;
+
     try {
       for await (const ev of streamChat(
-        { messages: baseHistory, model },
+        { messages: baseHistory, model: modelUsed },
         ctrl.signal,
       )) {
         if (ev.kind === "delta") {
@@ -401,6 +601,7 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
           }));
         } else if (ev.kind === "done") {
           mutateTail((m) => ({ ...m, streaming: false }));
+          if (ev.usage) recordUsage(modelUsed, ev.usage.input, ev.usage.output);
         } else if (ev.kind === "error") {
           setError(ev.message || "error");
           // Drop the empty assistant placeholder so we don't leave a
@@ -434,17 +635,17 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
 
   return (
     <>
-      {/* Floating launcher pill — hidden while sidebar open. Sits in
-       *  the bottom-right cluster alongside the patchplan / temps
-       *  bubbles; the sidebar itself opens from the left so the pill
-       *  doesn't have to be next to it. */}
+      {/* Floating launcher pill — hidden while sidebar open. Sits
+       *  bottom-left so it visually previews where the sidebar will
+       *  slide in from. Raised above the case-tabs dock so it never
+       *  hides behind a minimised case tab. */}
       {!open && (
         <button
           type="button"
           aria-label={t("chat.open")}
           title={t("chat.open")}
           onClick={() => setOpen(true)}
-          className="fixed bottom-6 right-44 solid-panel surface-1-hover px-4 py-3 text-sm flex items-center gap-2 cursor-pointer"
+          className="fixed bottom-24 left-6 solid-panel surface-1-hover px-4 py-3 text-sm flex items-center gap-2 cursor-pointer"
           style={{ zIndex: 1900 }}
         >
           <ChatGlyph />
@@ -460,7 +661,12 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
             animate={{ x: 0 }}
             exit={{ x: -width }}
             transition={{ type: "tween", duration: 0.22 }}
-            className="solid-panel fixed top-0 left-0 h-screen flex flex-col"
+            // The left edge sits flush against the viewport, so the
+            // 24px panel corners there are wasted — and at the right
+            // edge they leave a gap behind the panel where the rounded
+            // SVG doesn't cover the background. Square off the left,
+            // keep the right rounded.
+            className="solid-panel fixed top-0 left-0 h-screen flex flex-col !rounded-l-none overflow-hidden"
             style={{ width, zIndex: 2000 }}
             role="dialog"
             aria-label={t("chat.title")}
@@ -617,8 +823,32 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
                   />
                 ))}
                 {error && (
-                  <div className="px-3 py-2 rounded text-xs border border-red-500/40 text-red-700 dark:text-red-300 bg-red-500/10">
-                    {error}
+                  <div className="px-3 py-2 rounded text-xs border border-red-500/40 text-red-700 dark:text-red-300 bg-red-500/10 flex items-start gap-2">
+                    <div className="flex-1 min-w-0 break-words">
+                      <div className="font-medium mb-0.5">{t("chat.errorTitle")}</div>
+                      <div className="opacity-80">{error}</div>
+                    </div>
+                    <div className="flex flex-col gap-1 shrink-0">
+                      {lastUserText && !busy && (
+                        <button
+                          type="button"
+                          onClick={handleRetry}
+                          className="surface-1 surface-1-hover px-2 py-1 rounded text-xs cursor-pointer"
+                          title={t("chat.retryTooltip")}
+                        >
+                          ↻ {t("chat.retry")}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setError(null)}
+                        className="surface-1 surface-1-hover px-2 py-1 rounded text-xs cursor-pointer opacity-70"
+                        aria-label={t("common.close")}
+                        title={t("common.close")}
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -640,28 +870,43 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
                   disabled={busy}
                   className="surface-1 w-full px-3 py-2 rounded text-sm resize-none focus:outline-none focus:ring-1 focus:ring-sky-500/50"
                 />
-                <div className="flex items-center justify-between mt-2">
-                  <span className="text-xs opacity-50">
+                <div className="flex items-center justify-between gap-2 mt-2">
+                  <span className="text-xs opacity-50 truncate">
                     {t("chat.enterHint")}
                   </span>
-                  {busy ? (
-                    <button
-                      type="button"
-                      onClick={() => abortRef.current?.abort()}
-                      className="surface-1 surface-1-hover px-3 py-1 text-xs rounded cursor-pointer"
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className="text-xs opacity-60 tabular-nums"
+                      title={t("chat.tokenTooltip", {
+                        today: todayTokens.toLocaleString(),
+                        todayCost: todayCostUsd.toFixed(4),
+                        month: monthTokens.toLocaleString(),
+                        monthCost: monthCostUsd.toFixed(4),
+                      })}
                     >
-                      {t("chat.stop")}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleSend}
-                      disabled={!draft.trim()}
-                      className="px-3 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                    >
-                      {t("chat.send")}
-                    </button>
-                  )}
+                      {t("chat.tokenToday")}: {formatTokens(todayTokens)} ({formatCost(todayCostUsd)})
+                      {" · "}
+                      {t("chat.tokenMonth")}: {formatTokens(monthTokens)} ({formatCost(monthCostUsd)})
+                    </span>
+                    {busy ? (
+                      <button
+                        type="button"
+                        onClick={() => abortRef.current?.abort()}
+                        className="surface-1 surface-1-hover px-3 py-1 text-xs rounded cursor-pointer"
+                      >
+                        {t("chat.stop")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleSend()}
+                        disabled={!draft.trim()}
+                        className="px-3 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {t("chat.send")}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 

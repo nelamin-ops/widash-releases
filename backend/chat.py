@@ -626,7 +626,11 @@ def _run_tool(
 
 class ChatMessage(BaseModel):
     role: str = Field(pattern=r"^(user|assistant)$")
-    content: str = Field(min_length=1, max_length=20000)
+    # Tolerate empty content — an aborted stream can leave a blank
+    # assistant placeholder in the persisted history, and we filter
+    # those out in the request handler rather than 422-ing the
+    # whole conversation back to the user.
+    content: str = Field(min_length=0, max_length=20000)
 
 
 class ChatRequest(BaseModel):
@@ -763,9 +767,20 @@ async def _run_stream(
         })
         return
 
+    # Drop any empty-content turns (typically a stale streaming
+    # placeholder from an aborted previous reply) — Anthropic's API
+    # rejects messages with empty content blocks, and we'd 500 here
+    # otherwise. The Pydantic schema deliberately accepts them so
+    # the frontend can re-send a slightly-stale history without
+    # 422-ing the whole conversation.
     history: list[dict[str, Any]] = [
-        {"role": m.role, "content": m.content} for m in body.messages
+        {"role": m.role, "content": m.content}
+        for m in body.messages
+        if (m.content or "").strip()
     ]
+    if not history:
+        yield _sse("error", {"message": "no_messages"})
+        return
     system = _system_prompt(active_sites)
 
     total_input = 0

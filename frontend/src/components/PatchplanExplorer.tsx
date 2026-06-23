@@ -129,7 +129,7 @@ export function PatchplanExplorer() {
         onClick={() => setState((s) => ({ ...s, open: !s.open }))}
         title="Master patchplan"
         aria-label="Open master patchplan"
-        className="fixed bottom-6 right-6 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl transition-transform hover:scale-105 active:scale-95"
+        className="fixed bottom-24 right-6 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl transition-transform hover:scale-105 active:scale-95"
         style={{
           zIndex: 1900,
           background: "linear-gradient(135deg, #818CF8, #6366F1)",

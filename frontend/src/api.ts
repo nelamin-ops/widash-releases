@@ -544,11 +544,28 @@ export async function* streamChat(
   if (!res.ok) {
     let detail: any = undefined;
     try { detail = await res.json(); } catch { /* ignore */ }
-    const message =
-      (detail?.detail?.message as string) ||
-      (detail?.message as string) ||
-      `HTTP ${res.status}`;
-    yield { kind: "error", message, code: detail?.detail?.error };
+    // Pydantic 422 shape: {detail: [{loc:[...], msg, type}, …]}.
+    // Our custom errors: {detail: {error, message}} or {message}.
+    // Distinguish the two so the user sees something they can act on
+    // rather than a generic "HTTP 422".
+    let message: string | null = null;
+    if (Array.isArray(detail?.detail)) {
+      const first = detail.detail[0];
+      const loc = Array.isArray(first?.loc) ? first.loc.join(".") : "";
+      message = first?.msg
+        ? `Bad request${loc ? ` (${loc})` : ""}: ${first.msg}`
+        : `HTTP ${res.status}`;
+    } else {
+      message =
+        (detail?.detail?.message as string) ||
+        (detail?.message as string) ||
+        `HTTP ${res.status}`;
+    }
+    yield {
+      kind: "error",
+      message,
+      code: detail?.detail?.error ?? `http_${res.status}`,
+    };
     return;
   }
   const reader = res.body?.getReader();

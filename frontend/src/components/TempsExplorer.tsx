@@ -195,7 +195,7 @@ export function TempsExplorer({ sites }: TempsExplorerProps) {
         onClick={() => setOpen((v) => !v)}
         title={t("temps.fabTitle")}
         aria-label={t("temps.fabTitle")}
-        className="fixed bottom-6 right-24 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl transition-transform hover:scale-105 active:scale-95"
+        className="fixed bottom-24 right-24 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl transition-transform hover:scale-105 active:scale-95"
         style={{
           zIndex: 1900,
           background: "linear-gradient(135deg, #FB7185, #F97316)",

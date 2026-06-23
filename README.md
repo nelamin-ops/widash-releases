@@ -254,12 +254,31 @@ corresponding in-app action:
 | `widash://serial/<sn>` | same idea via serial number |
 
 **Persisted conversations.** Up to 30 past conversations are kept in
-`localStorage` so closing the panel (×) only minimises, and a full page
-reload restores the active thread. The header shows the title of the
-current conversation (derived from its first user message), with
-a chevron that expands a history list — pick another conversation,
-start a fresh one with **+**, or delete a single conversation from the
-list. The trash icon clears only the *active* conversation.
+`localStorage` so closing the panel (− minimise button) only hides it,
+and a full page reload restores the active thread. The header shows
+the title of the current conversation (derived from its first user
+message), with a chevron that expands a history list — pick another
+conversation, start a fresh one with **+**, or delete a single
+conversation from the list. The trash icon clears only the *active*
+conversation.
+
+**Token & cost footer.** The composer footer carries a running
+`Today: <tok> ($X.XX) · Month: <tok> ($X.XX)` line. Counts only the
+chats run inside WiDash — DevBar's global indicator covers everything
+else. Costs are computed locally with Anthropic's public pricing
+(Sonnet 4.6: $3 in / $15 out per M; Opus 4.7: $15 / $75 per M; see
+`PRICING` in `frontend/src/components/ChatSidebar.tsx`). The Express
+LLM Gateway is a transparent passthrough, so the local figure tracks
+what the engineer's SF identity gets billed.
+
+**Error handling & retry.** Streaming failures (gateway down, stale
+DevBar token, Pydantic 422 on a corrupted history) surface as an
+inline red banner with the Pydantic field name when applicable. A
+**↻ Retry** button re-sends the last user message after dropping
+the failed turn from the conversation, so a transient failure
+doesn't lose the question. Empty assistant placeholders left behind
+by an aborted stream are filtered out of the history on the next
+send, both client-side and server-side.
 
 Useful for "what's the highest-priority RMA in pending drain right
 now", "what's room 14.4 looking like temperature-wise", or summarising

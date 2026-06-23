@@ -282,6 +282,12 @@ const dict = {
     "chat.newConversation": "New conversation",
     "chat.deleteConversation": "Delete conversation",
     "chat.minimize": "Minimize (conversations stay saved)",
+    "chat.tokenToday": "Today",
+    "chat.tokenMonth": "Month",
+    "chat.tokenTooltip": "WiDash chat usage · today {today} tok / ${todayCost} · this month {month} tok / ${monthCost}. Costs use Anthropic public pricing (Sonnet 4.6: $3/$15 per M in/out, Opus 4.7: $15/$75 per M). Only counts this app — DevBar shows your global Claude usage across all integrations.",
+    "chat.errorTitle": "Couldn't reach the assistant",
+    "chat.retry": "Retry",
+    "chat.retryTooltip": "Re-send the last message",
   },
   de: {
     "header.locationFilter": "Standort-Filter",
@@ -557,6 +563,12 @@ const dict = {
     "chat.newConversation": "Neue Unterhaltung",
     "chat.deleteConversation": "Unterhaltung löschen",
     "chat.minimize": "Minimieren (Unterhaltungen bleiben gespeichert)",
+    "chat.tokenToday": "Heute",
+    "chat.tokenMonth": "Monat",
+    "chat.tokenTooltip": "WiDash-Chat-Verbrauch · heute {today} Tok / ${todayCost} · diesen Monat {month} Tok / ${monthCost}. Kosten nach öffentlichem Anthropic-Pricing (Sonnet 4.6: $3/$15 pro M In/Out, Opus 4.7: $15/$75 pro M). Zählt nur diese App; DevBar zeigt globalen Claude-Verbrauch über alle Integrationen.",
+    "chat.errorTitle": "Assistent nicht erreichbar",
+    "chat.retry": "Erneut versuchen",
+    "chat.retryTooltip": "Letzte Nachricht erneut senden",
   },
 } as const;
 
