@@ -32,6 +32,9 @@ export interface FieldChange {
   oldDisplay?: string | null;
   newDisplay?: string | null;
   sobject: SectionKind;
+  /** Optional case number for batch-confirm scenarios. Single-case flow
+   *  (from CaseDetailSheet) omits this. */
+  caseNumber?: string;
 }
 
 interface LookupDisplay {

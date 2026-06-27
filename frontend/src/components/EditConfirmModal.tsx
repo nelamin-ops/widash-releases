@@ -43,6 +43,9 @@ export function EditConfirmModal({
     asset: changes.filter((c) => c.sobject === "asset"),
   };
 
+  // Show a "Case" column if any change has a caseNumber.
+  const showCaseColumn = changes.some((c) => c.caseNumber !== undefined);
+
   return createPortal(
     <div
       role="dialog"
@@ -93,6 +96,9 @@ export function EditConfirmModal({
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left text-xs uppercase tracking-wide opacity-70">
+                      {showCaseColumn && (
+                        <th className="px-3 py-2 w-24">{t("edit.colCase")}</th>
+                      )}
                       <th className="px-3 py-2 w-1/4">{t("edit.colField")}</th>
                       <th className="px-3 py-2 w-1/3">{t("edit.colOld")}</th>
                       <th className="px-3 py-2">{t("edit.colNew")}</th>
@@ -101,6 +107,11 @@ export function EditConfirmModal({
                   <tbody>
                     {grouped[kind].map((c) => (
                       <tr key={c.apiName} className="divider-t">
+                        {showCaseColumn && (
+                          <td className="px-3 py-2 opacity-70">
+                            {c.caseNumber ?? "—"}
+                          </td>
+                        )}
                         <td className="px-3 py-2 font-medium">{c.label}</td>
                         <td className="px-3 py-2 opacity-70 break-words">
                           {formatValue(c.oldValue, c.oldDisplay)}

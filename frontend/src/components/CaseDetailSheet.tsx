@@ -437,13 +437,13 @@ export function CaseDetailSheet({
   usePolling(reloadAll, 30_000, isBlocked);
 
   async function handleChatterSubmit(
-    body: string, source: ChatterSource, parentId?: string,
+    body: string, source: ChatterSource, parentId?: string, mentions?: string[],
   ) {
     // Email is read-only — the panel hides compose for that tab anyway.
     if (source === "email") return;
     if (!writeMode.enabled) {
       // eslint-disable-next-line no-console
-      console.log("[dry-run chatter]", source, parentId ?? "top", body);
+      console.log("[dry-run chatter]", source, parentId ?? "top", body, mentions);
       setWriteToast(t("edit.toastDryRun"));
       return;
     }
@@ -466,6 +466,7 @@ export function CaseDetailSheet({
       await postCaseComment(ticket.id, {
         source, body,
         parentFeedItemId: parentId,
+        mentions,
       });
       await reloadChatter();
       setWriteToast(t("edit.toastPosted"));

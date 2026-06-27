@@ -2,7 +2,7 @@ import logging
 import re
 import time
 import requests
-from fastapi import Depends, FastAPI, Header, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -1069,6 +1069,10 @@ class CommentIn(BaseModel):
     source: str  # "chatter" | "caseComments"
     body: str
     parentFeedItemId: str | None = None
+    # NEW: optional list of SF user IDs to mention. When non-empty,
+    # the post goes through Chatter Connect API instead of FeedItem.create.
+    # Each ID gets validated by _require_sf_id.
+    mentions: list[str] | None = None
 
 
 class CommentEditIn(BaseModel):
@@ -1077,6 +1081,10 @@ class CommentEditIn(BaseModel):
     Salesforce enforces that — we mirror it at the API layer."""
     kind: str  # "post" | "comment"
     body: str
+    # NEW: when present, the edit uses Connect API. Mentions appended to
+    # the body; existing mentions in the entry are NOT preserved (v1
+    # limitation — the user re-mentions if they edit).
+    mentions: list[str] | None = None
 
 
 @app.post("/api/case/{case_id}/comment")
@@ -1105,18 +1113,48 @@ def post_case_comment(
             status_code=400,
             content={"error": "empty", "message": "Comment body is empty."},
         )
+    # Validate mentions (each must be an SF Id)
+    mention_ids: list[str] = []
+    for mid in payload.mentions or []:
+        if (err := _require_sf_id(mid)) is not None:
+            return err
+        mention_ids.append(mid)
     try:
         if payload.source == "caseComments":
+            # CaseComment has no Connect-API equivalent for mentions in
+            # the same shape — for v1, we ignore mentions on private
+            # case comments and write as plain text.
             sf.CaseComment.create({
                 "ParentId": case_id,
                 "CommentBody": body,
             })
+        elif payload.source == "chatter" and mention_ids and not payload.parentFeedItemId:
+            # Top-level Chatter post with mentions → use Connect API.
+            segments: list[dict[str, str]] = []
+            for uid in mention_ids:
+                segments.append({"type": "Mention", "id": uid})
+                segments.append({"type": "Text", "text": " "})
+            if body:
+                segments.append({"type": "Text", "text": body})
+            sf.restful(
+                f"connect/records/{case_id}/feed-elements",
+                method="POST",
+                json={
+                    "feedElementType": "FeedItem",
+                    "subjectId": case_id,
+                    "body": {"messageSegments": segments},
+                },
+            )
         elif payload.source == "chatter" and payload.parentFeedItemId:
+            # Reply via FeedComment. v1: we don't carry mentions into
+            # replies (path differs and is rarely needed) — fall back
+            # to plain text body for replies.
             sf.FeedComment.create({
                 "FeedItemId": payload.parentFeedItemId,
                 "CommentBody": body,
             })
         elif payload.source == "chatter":
+            # Top-level Chatter post without mentions → legacy path.
             sf.FeedItem.create({
                 "ParentId": case_id,
                 "Body": body,
@@ -1461,6 +1499,91 @@ def get_avatar(
     ctype = r.headers.get("Content-Type") or "image/png"
     _avatar_cache[user_id] = (now, r.content, ctype)
     return Response(content=r.content, media_type=ctype)
+
+
+# ---------------------------------------------------------------------------
+# User search (for @-mentions in Chatter)
+# ---------------------------------------------------------------------------
+# Allow-list-regex matches what a human realistically types when looking up
+# a colleague: letters/digits/dots/hyphens/apostrophes/spaces/@. Same
+# defensive posture as the rest of the SF input surface.
+_USER_SEARCH_Q_RE = re.compile(r"^[A-Za-z0-9 .\-_'@]{0,50}$")
+
+
+def _soql_escape_like(s: str) -> str:
+    """Escape a string for safe inclusion inside a SOQL LIKE clause.
+
+    SOQL needs single-quote and backslash escaping; for LIKE we also
+    neutralise the %_ wildcards so the user's literal query doesn't
+    accidentally widen the match.
+    """
+    return (
+        s.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+class UserSearchHit(BaseModel):
+    id: str
+    name: str
+    username: str
+    photoUrl: str
+
+
+class UserSearchResponse(BaseModel):
+    users: list[UserSearchHit]
+
+
+@app.get("/api/sf/user-search", response_model=UserSearchResponse)
+def sf_user_search(
+    q: str = "",
+    client: GusClient = Depends(get_gus_client),
+) -> UserSearchResponse:
+    """Org-wide live search for active SF users by name or username.
+    Used by the @-mention dropdown in the Chatter compose surfaces.
+    Returns up to 8 hits with photo URLs that go through our avatar
+    proxy so the browser doesn't need an SF session cookie.
+    """
+    if not _USER_SEARCH_Q_RE.match(q):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_query",
+                    "message": "query has invalid characters or is too long"},
+        )
+    q = q.strip()
+    if not q:
+        return UserSearchResponse(users=[])
+    sf = client._sf
+    if sf is None:
+        raise HTTPException(
+            status_code=503, detail={"error": "no_sf_session"},
+        )
+    needle = _soql_escape_like(q)
+    try:
+        rows = sf.query(
+            f"SELECT Id, Name, Username FROM User "
+            f"WHERE IsActive = true "
+            f"AND (Name LIKE '%{needle}%' OR Username LIKE '%{needle}%') "
+            f"ORDER BY Name LIMIT 8"
+        ).get("records", [])
+    except SalesforceError:
+        logger.exception("user-search SOQL failed")
+        raise HTTPException(
+            status_code=502, detail={"error": "salesforce_error"},
+        )
+    return UserSearchResponse(
+        users=[
+            UserSearchHit(
+                id=r["Id"],
+                name=r.get("Name") or "",
+                username=r.get("Username") or "",
+                photoUrl=f"/api/avatar/{r['Id']}",
+            )
+            for r in rows
+        ],
+    )
 
 
 @app.get("/api/case/{case_id}/feed")

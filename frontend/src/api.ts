@@ -162,6 +162,24 @@ export interface CommentBody {
   source: "chatter" | "caseComments";
   body: string;
   parentFeedItemId?: string;
+  /** SF user IDs to @-mention. Only honoured server-side for
+   *  top-level chatter posts (replies and case-comments ignore it). */
+  mentions?: string[];
+}
+
+export interface UserSearchHit {
+  id: string;
+  name: string;
+  username: string;
+  photoUrl: string;
+}
+
+export async function userSearch(q: string): Promise<UserSearchHit[]> {
+  const r = await apiFetch(
+    `/api/sf/user-search?q=${encodeURIComponent(q)}`,
+  );
+  const data = await handle<{ users: UserSearchHit[] }>(r);
+  return data.users;
 }
 
 export async function postCaseComment(caseId: string, payload: CommentBody) {
@@ -512,9 +530,62 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ProposalChange {
+  sobject: "case" | "asset";
+  apiName: string;
+  label: string;
+  type: string | null;
+  oldValue: unknown;
+  oldDisplay: string | null;
+  newValue: unknown;
+  newDisplay: string | null;
+}
+
+export interface CasePatchProposal {
+  kind2: "case_patch_proposal";
+  proposalId: string;
+  caseId: string;
+  caseNumber: string;
+  assetId: string | null;
+  changes: ProposalChange[];
+}
+
+export interface ProposalMention {
+  userId: string;
+  displayName: string;
+}
+
+export interface ChatterPostProposal {
+  kind2: "chatter_post_proposal";
+  proposalId: string;
+  caseId: string;
+  caseNumber: string;
+  source: "chatter" | "caseComments";
+  body: string;
+  parentId: string | null;
+  mentions?: ProposalMention[];
+}
+
+export interface ChatterEditProposal {
+  kind2: "chatter_edit_proposal";
+  proposalId: string;
+  caseId: string;
+  caseNumber: string | null;
+  entryId: string;
+  entryKind: "post" | "comment";
+  oldBody: string;
+  newBody: string;
+}
+
+export type ProposalPayload =
+  | CasePatchProposal
+  | ChatterPostProposal
+  | ChatterEditProposal;
+
 export type ChatStreamEvent =
   | { kind: "delta"; text: string }
   | { kind: "tool"; name: string; status: "started" | "finished" }
+  | { kind: "proposal"; proposal: ProposalPayload }
   | { kind: "done"; usage?: { input: number; output: number } }
   | { kind: "error"; message: string; code?: string };
 
@@ -598,6 +669,22 @@ export async function* streamChat(
         if (event === "delta") yield { kind: "delta", text: data.text ?? "" };
         else if (event === "tool")
           yield { kind: "tool", name: data.name, status: data.status };
+        else if (event === "proposal") {
+          const k2 = (data as { kind?: string })?.kind;
+          if (
+            k2 === "case_patch_proposal" ||
+            k2 === "chatter_post_proposal" ||
+            k2 === "chatter_edit_proposal"
+          ) {
+            // Map server "kind" to our "kind2" so the discriminator
+            // doesn't collide with ChatStreamEvent.kind.
+            const { kind, ...rest } = data as { kind: string };
+            yield {
+              kind: "proposal",
+              proposal: { kind2: kind, ...rest } as ProposalPayload,
+            };
+          }
+        }
         else if (event === "done")
           yield { kind: "done", usage: data.usage };
         else if (event === "error")

@@ -4,7 +4,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { IconButton } from "./IconButton";
 import { useLanguage } from "../hooks/useLanguage";
-import { streamChat, type ChatMessage } from "../api";
+import { streamChat, type ChatMessage, patchCase, patchAsset, postCaseComment, patchChatterEntry, type ProposalPayload } from "../api";
+import { ProposalCard } from "./ProposalCard";
+import { EditConfirmModal } from "./EditConfirmModal";
+import { ChatterConfirmModal } from "./ChatterConfirmModal";
+import { useWriteMode } from "../hooks/useWriteMode";
 
 // Allow-list for in-app links the assistant can emit. Each regex is
 // the injection defence: when the regex matches, we let the click
@@ -193,12 +197,33 @@ interface ToolEvent {
   ts: number;
 }
 
+export type ProposalLineState = "pending" | "applied" | "discarded" | "failed";
+
+interface ProposalLine {
+  proposal: ProposalPayload;
+  state: ProposalLineState;
+  errorMessage?: string | null;
+}
+
+export type ProposalGroupState =
+  "pending" | "confirming" | "applied" | "discarded" | "failed";
+
+interface ProposalGroup {
+  groupId: string;             // p_<6-hex> (FE-generated)
+  toolName: "propose_case_patch" | "propose_chatter_post" | "propose_chatter_edit";
+  state: ProposalGroupState;
+  lines: ProposalLine[];
+  errorMessage?: string | null;
+}
+
 interface RenderedMessage extends ChatMessage {
   /** Tool calls Claude made *before* this assistant message — shown as
    *  small ghost lines so the user sees what data was fetched. */
   tools?: ToolEvent[];
   /** True while Claude is still streaming this message. */
   streaming?: boolean;
+  /** Proposals attached to this assistant message. */
+  proposalGroups?: ProposalGroup[];
 }
 
 interface Conversation {
@@ -212,6 +237,19 @@ interface Conversation {
 
 function newConversationId(): string {
   return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function newGroupId(): string {
+  // 6 hex chars, prefix g_ so it's distinguishable from the server-
+  // generated p_<...> proposalIds in logs.
+  const rnd = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+  return `g_${rnd}`;
+}
+
+function toolFromProposalKind(k2: ProposalPayload["kind2"]): ProposalGroup["toolName"] {
+  if (k2 === "case_patch_proposal") return "propose_case_patch";
+  if (k2 === "chatter_post_proposal") return "propose_chatter_post";
+  return "propose_chatter_edit";
 }
 
 function titleFromText(text: string): string {
@@ -237,10 +275,28 @@ function loadConversations(): Conversation[] {
       )
       // Strip any stale "streaming: true" flags from a conversation
       // that was persisted mid-stream (rare but possible if the user
-      // hard-reloads while a reply is in flight).
+      // hard-reloads while a reply is in flight). Also discard any
+      // pending/confirming proposals — proposalIds are only tab-lifetime
+      // valid, a stale pending card could execute against outdated data.
       .map((c) => ({
         ...c,
-        messages: c.messages.map((m) => ({ ...m, streaming: false })),
+        messages: c.messages.map((m) => {
+          const msg = m as RenderedMessage & { proposals?: unknown };
+          delete msg.proposals;
+          return {
+            ...msg,
+            streaming: false,
+            proposalGroups: msg.proposalGroups?.map((g) =>
+              g.state === "pending" || g.state === "confirming"
+                ? {
+                    ...g,
+                    state: "discarded" as const,
+                    lines: g.lines.map((l) => ({ ...l, state: "discarded" as const })),
+                  }
+                : g,
+            ),
+          };
+        }),
       }));
   } catch { return []; }
 }
@@ -264,6 +320,7 @@ interface ChatSidebarProps extends ChatLinkHandlers {}
 export function ChatSidebar(props: ChatSidebarProps = {}) {
   const linkHandlers: ChatLinkHandlers = props;
   const { t } = useLanguage();
+  const writeMode = useWriteMode();
   const [open, setOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>(
@@ -281,6 +338,11 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
   const [lastUserText, setLastUserText] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageByDay>(() => loadUsage());
   useEffect(() => { saveUsage(usage); }, [usage]);
+
+  // Proposal confirmation state
+  const [activeConfirmGroupId, setActiveConfirmGroupId] = useState<string | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Compute today's + this-month's totals from the daily buckets.
   // Recomputes on every render, which is fine — usage is small (one
@@ -584,6 +646,9 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
     // the gateway actually ran.
     const modelUsed: Model = model;
 
+    // kept across all proposal events of THIS streamChat run
+    const currentTurnGroups = new Map<string, string>();   // toolName → groupId
+
     try {
       for await (const ev of streamChat(
         { messages: baseHistory, model: modelUsed },
@@ -599,6 +664,41 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
               { name: ev.name, status: ev.status, ts: Date.now() },
             ],
           }));
+        } else if (ev.kind === "proposal") {
+          // Map is the source of truth for "which group within THIS
+          // streamChat run holds proposals of this tool-name". Look up /
+          // allocate the group-id synchronously here; the setState
+          // reducer below uses React's guarantee that `prev` is the
+          // latest state (so it correctly sees a group created by a
+          // previous event of the same turn — even if React hasn't
+          // committed a render between events).
+          const toolName = toolFromProposalKind(ev.proposal.kind2);
+          let groupId = currentTurnGroups.get(toolName);
+          if (!groupId) {
+            groupId = newGroupId();
+            currentTurnGroups.set(toolName, groupId);
+          }
+          const targetGroupId = groupId;
+          mutateTail((m) => {
+            const groups = m.proposalGroups ?? [];
+            const exists = groups.some((g) => g.groupId === targetGroupId);
+            const next = exists
+              ? groups.map((g) =>
+                  g.groupId === targetGroupId
+                    ? { ...g, lines: [...g.lines, { proposal: ev.proposal, state: "pending" as const }] }
+                    : g,
+                )
+              : [
+                  ...groups,
+                  {
+                    groupId: targetGroupId,
+                    toolName,
+                    state: "pending" as const,
+                    lines: [{ proposal: ev.proposal, state: "pending" as const }],
+                  },
+                ];
+            return { ...m, proposalGroups: next };
+          });
         } else if (ev.kind === "done") {
           mutateTail((m) => ({ ...m, streaming: false }));
           if (ev.usage) recordUsage(modelUsed, ev.usage.input, ev.usage.output);
@@ -632,6 +732,198 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
     }
   }
 
+  // Proposal helpers
+  // Patch a whole group across all conversations.
+  function updateGroup(groupId: string, patch: Partial<ProposalGroup>) {
+    setConversations((prev) =>
+      prev.map((c) => ({
+        ...c,
+        messages: c.messages.map((m) => ({
+          ...m,
+          proposalGroups: m.proposalGroups?.map((g) =>
+            g.groupId === groupId ? { ...g, ...patch } : g,
+          ),
+        })),
+      })),
+    );
+  }
+
+  // Patch one line within a group.
+  function updateLine(
+    groupId: string,
+    lineIndex: number,
+    patch: Partial<ProposalLine>,
+  ) {
+    setConversations((prev) =>
+      prev.map((c) => ({
+        ...c,
+        messages: c.messages.map((m) => ({
+          ...m,
+          proposalGroups: m.proposalGroups?.map((g) =>
+            g.groupId === groupId
+              ? {
+                  ...g,
+                  lines: g.lines.map((l, i) =>
+                    i === lineIndex ? { ...l, ...patch } : l,
+                  ),
+                }
+              : g,
+          ),
+        })),
+      })),
+    );
+  }
+
+  function appendSystemNote(text: string) {
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== activeId) return c;
+        return {
+          ...c,
+          messages: [...c.messages, {
+            role: "user", content: text,
+          }],
+          updatedAt: Date.now(),
+        };
+      }),
+    );
+  }
+
+  function confirmGroup(g: ProposalGroup) {
+    if (activeConfirmGroupId) return;          // single-confirm lock
+    setActiveConfirmGroupId(g.groupId);
+    setConfirmError(null);
+    updateGroup(g.groupId, { state: "confirming" });
+  }
+
+  function discardGroup(g: ProposalGroup) {
+    updateGroup(g.groupId, {
+      state: "discarded",
+      lines: g.lines.map((l) => ({ ...l, state: "discarded" })),
+    });
+    appendSystemNote(
+      `[Systeminfo: Batch-Vorschlag ${g.groupId} (${g.lines.length} Cases) wurde verworfen.]`,
+    );
+  }
+
+  async function executeGroup(g: ProposalGroup) {
+    // Dry-run path
+    if (!writeMode.enabled) {
+      updateGroup(g.groupId, {
+        state: "applied",
+        lines: g.lines.map((l) => ({ ...l, state: "applied" })),
+      });
+      appendSystemNote(
+        `[Systeminfo: Batch-Vorschlag ${g.groupId} (Dry-Run, Write-Mode AUS, ${g.lines.length} Cases) simuliert.]`,
+      );
+      setActiveConfirmGroupId(null);
+      return;
+    }
+
+    setConfirmBusy(true);
+    setConfirmError(null);
+
+    // Filter out lines already applied (Retry-Run scenario): only run pending/failed.
+    const indexesToRun = g.lines
+      .map((l, i) => ({ l, i }))
+      .filter((x) => x.l.state === "pending" || x.l.state === "failed")
+      .map((x) => x.i);
+
+    let okCount = 0;
+    let failCount = 0;
+    const failDetails: string[] = [];
+
+    for (const i of indexesToRun) {
+      const p = g.lines[i].proposal;
+      try {
+        if (p.kind2 === "case_patch_proposal") {
+          const caseChanges = p.changes
+            .filter((c) => c.sobject === "case")
+            .map((c) => ({ apiName: c.apiName, value: c.newValue as any }));
+          const assetChanges = p.changes
+            .filter((c) => c.sobject === "asset")
+            .map((c) => ({ apiName: c.apiName, value: c.newValue as any }));
+          if (caseChanges.length > 0) await patchCase(p.caseId, caseChanges);
+          if (assetChanges.length > 0 && p.assetId) {
+            await patchAsset(p.assetId, assetChanges);
+          }
+        } else if (p.kind2 === "chatter_post_proposal") {
+          await postCaseComment(p.caseId, {
+            source: p.source, body: p.body,
+            parentFeedItemId: p.parentId ?? undefined,
+            mentions: p.mentions?.map((m) => m.userId),
+          });
+        } else if (p.kind2 === "chatter_edit_proposal") {
+          await patchChatterEntry(p.caseId, p.entryId, p.entryKind, p.newBody);
+        }
+        updateLine(g.groupId, i, { state: "applied", errorMessage: null });
+        okCount++;
+      } catch (e: any) {
+        const msg = e?.message ?? "unknown_error";
+        updateLine(g.groupId, i, { state: "failed", errorMessage: msg });
+        failCount++;
+        const caseLabel =
+          p.kind2 === "chatter_edit_proposal"
+            ? (p.caseNumber ?? p.entryId)
+            : (p as any).caseNumber ?? "?";
+        failDetails.push(`Case ${caseLabel} → ${msg}`);
+      }
+    }
+
+    // Cumulative counts across all runs (including previously-applied
+    // lines from an earlier partial-success run). Without this, a
+    // retry that fixes the last 2 of 5 cases would post "2 ausgeführt"
+    // and obscure the previous 3 in the conversation log.
+    const previouslyApplied = g.lines.filter(
+      (l, idx) => l.state === "applied" && !indexesToRun.includes(idx),
+    ).length;
+    const totalApplied = previouslyApplied + okCount;
+    const totalCases = g.lines.length;
+
+    // Compute aggregate state.
+    const newState: ProposalGroupState = failCount === 0 ? "applied" : "failed";
+    updateGroup(g.groupId, { state: newState });
+    setConfirmBusy(false);
+    if (failCount === 0) {
+      setActiveConfirmGroupId(null);
+      appendSystemNote(
+        `[Systeminfo: Batch-Vorschlag ${g.groupId} — ${totalApplied}/${totalCases} ausgeführt.]`,
+      );
+    } else {
+      // Modal stays open so the user sees the failed rows.
+      setConfirmError(`${failCount}/${okCount + failCount} fehlgeschlagen`);
+      appendSystemNote(
+        `[Systeminfo: Batch-Vorschlag ${g.groupId} — ${totalApplied}/${totalCases} ausgeführt, ${failCount} fehlgeschlagen. ${failDetails.join("; ")}]`,
+      );
+    }
+  }
+
+  function cancelConfirm(g: ProposalGroup) {
+    // Restore to "pending" only if none of the lines are applied/failed.
+    // If a previous run partially applied, drop back to "failed" or
+    // "applied" matching the line states.
+    const anyFailed = g.lines.some((l) => l.state === "failed");
+    const allApplied = g.lines.every((l) => l.state === "applied" || l.state === "discarded");
+    const restoredState: ProposalGroupState = anyFailed
+      ? "failed"
+      : allApplied
+      ? "applied"
+      : "pending";
+    updateGroup(g.groupId, { state: restoredState });
+    setActiveConfirmGroupId(null);
+    setConfirmError(null);
+  }
+
+  const activeGroup: ProposalGroup | null = (() => {
+    if (!activeConfirmGroupId) return null;
+    for (const c of conversations) {
+      for (const m of c.messages) {
+        const hit = (m.proposalGroups ?? []).find((g) => g.groupId === activeConfirmGroupId);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  })();
 
   return (
     <>
@@ -820,6 +1112,9 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
                     message={m}
                     t={t}
                     linkHandlers={linkHandlers}
+                    blocked={!!activeConfirmGroupId}
+                    onConfirmGroup={confirmGroup}
+                    onDiscardGroup={discardGroup}
                   />
                 ))}
                 {error && (
@@ -910,6 +1205,85 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
                 </div>
               </div>
 
+              {/* Proposal confirmation modals */}
+              {activeGroup?.toolName === "propose_case_patch" && (() => {
+                // Flatten all lines × all changes into one FieldChange[] for the modal.
+                const allChanges = activeGroup.lines.flatMap((line) => {
+                  const p = line.proposal as Extract<ProposalPayload, { kind2: "case_patch_proposal" }>;
+                  return p.changes.map((c) => ({
+                    apiName: c.apiName,
+                    label: c.label,
+                    type: (c.type ?? "string") as any,
+                    oldValue: c.oldValue as any,
+                    oldDisplay: c.oldDisplay,
+                    newValue: c.newValue as any,
+                    newDisplay: c.newDisplay,
+                    sobject: c.sobject,
+                    caseNumber: p.caseNumber,
+                  }));
+                });
+                // The modal accepts a `changes` array; pass the first proposal's
+                // caseNumber as the modal's `caseNumber` prop (header text).
+                const first = activeGroup.lines[0].proposal as Extract<ProposalPayload, { kind2: "case_patch_proposal" }>;
+                return (
+                  <EditConfirmModal
+                    caseNumber={t("chat.proposal.modalSubtitleCasesFirst", {
+                      count: activeGroup.lines.length,
+                      first: first.caseNumber,
+                    })}
+                    changes={allChanges}
+                    onCancel={() => cancelConfirm(activeGroup!)}
+                    onEdit={() => cancelConfirm(activeGroup!)}
+                    onConfirm={() => executeGroup(activeGroup!)}
+                    busy={confirmBusy}
+                    error={confirmError}
+                  />
+                );
+              })()}
+
+              {activeGroup?.toolName === "propose_chatter_post" && (() => {
+                const first = activeGroup.lines[0].proposal as Extract<ProposalPayload, { kind2: "chatter_post_proposal" }>;
+                const entries = activeGroup.lines.map((line) => {
+                  const p = line.proposal as Extract<ProposalPayload, { kind2: "chatter_post_proposal" }>;
+                  return { caseNumber: p.caseNumber, body: p.body, mentions: p.mentions };
+                });
+                return (
+                  <ChatterConfirmModal
+                    caseNumber={t("chat.proposal.modalSubtitleCases", {
+                      count: activeGroup.lines.length,
+                    })}
+                    mode={{ kind: "post-batch", source: first.source, entries }}
+                    onCancel={() => cancelConfirm(activeGroup!)}
+                    onConfirm={() => executeGroup(activeGroup!)}
+                    busy={confirmBusy}
+                    error={confirmError}
+                  />
+                );
+              })()}
+
+              {activeGroup?.toolName === "propose_chatter_edit" && (() => {
+                const entries = activeGroup.lines.map((line) => {
+                  const p = line.proposal as Extract<ProposalPayload, { kind2: "chatter_edit_proposal" }>;
+                  return {
+                    caseNumber: p.caseNumber ?? p.entryId.slice(0, 8),
+                    oldBody: p.oldBody,
+                    newBody: p.newBody,
+                  };
+                });
+                return (
+                  <ChatterConfirmModal
+                    caseNumber={t("chat.proposal.modalSubtitleEdits", {
+                      count: activeGroup.lines.length,
+                    })}
+                    mode={{ kind: "edit-batch", entries }}
+                    onCancel={() => cancelConfirm(activeGroup!)}
+                    onConfirm={() => executeGroup(activeGroup!)}
+                    busy={confirmBusy}
+                    error={confirmError}
+                  />
+                );
+              })()}
+
               {/* Drag-to-resize handle — pinned to the right edge of
                   the panel. Wider hit area than visible line so it's
                   easy to grab. */}
@@ -932,11 +1306,14 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
 }
 
 function MessageBubble({
-  message, t, linkHandlers,
+  message, t, linkHandlers, blocked, onConfirmGroup, onDiscardGroup,
 }: {
   message: RenderedMessage;
   t: (k: any) => string;
   linkHandlers: ChatLinkHandlers;
+  blocked: boolean;
+  onConfirmGroup: (g: ProposalGroup) => void;
+  onDiscardGroup: (g: ProposalGroup) => void;
 }) {
   const isUser = message.role === "user";
   const tools = message.tools ?? [];
@@ -978,6 +1355,15 @@ function MessageBubble({
           "…"
         ) : null}
       </div>
+      {(message.proposalGroups ?? []).map((g) => (
+        <ProposalCard
+          key={g.groupId}
+          group={g}
+          blocked={blocked && g.state === "pending"}
+          onConfirm={() => onConfirmGroup(g)}
+          onDiscard={() => onDiscardGroup(g)}
+        />
+      ))}
     </div>
   );
 }
@@ -1129,6 +1515,9 @@ function prettyToolName(name: string): string {
     case "temps_rack": return "temps_rack";
     case "coolan_components": return "coolan_components";
     case "patchplan_search": return "patchplan_search";
+    case "propose_case_patch": return "propose_case_patch";
+    case "propose_chatter_post": return "propose_chatter_post";
+    case "propose_chatter_edit": return "propose_chatter_edit";
     default: return name;
   }
 }

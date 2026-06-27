@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useLanguage, localeFor } from "../hooks/useLanguage";
 import type { ChatterSource, FeedEntry } from "./sheetChatter";
+import { MentionInput, type MentionInputValue } from "./MentionInput";
 
 interface ChatterPanelProps {
   entries: FeedEntry[];
@@ -12,6 +13,7 @@ interface ChatterPanelProps {
     body: string,
     source: ChatterSource,
     parentId?: string,
+    mentions?: string[],
   ) => void;
   /** Called when the user edits one of their own existing entries.
    *  Parent persists to SF + replaces the entry locally. */
@@ -71,11 +73,11 @@ export function ChatterPanel({
   const { t, lang } = useLanguage();
   const locale = localeFor(lang);
   const [source, setSource] = useState<ChatterSource>("chatter");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState<MentionInputValue>({ body: "", mentions: [] });
   const [replyTo, setReplyTo] = useState<string | null>(null);
-  const [replyDraft, setReplyDraft] = useState("");
+  const [replyDraft, setReplyDraft] = useState<MentionInputValue>({ body: "", mentions: [] });
   const [editing, setEditing] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
+  const [editDraft, setEditDraft] = useState<MentionInputValue>({ body: "", mentions: [] });
   const [editBusy, setEditBusy] = useState(false);
 
   // Filter entries by selected source, sort newest first.
@@ -115,14 +117,15 @@ export function ChatterPanel({
   }, [filtered]);
 
   function submitTopLevel() {
-    const body = draft.trim();
+    const body = draft.body.trim();
     if (!body) return;
-    onSubmit(body, source);
-    setDraft("");
+    const mentions = draft.mentions.map((m) => m.userId);
+    onSubmit(body, source, undefined, mentions);
+    setDraft({ body: "", mentions: [] });
   }
 
   function submitReply(entry: FeedEntry) {
-    const body = replyDraft.trim();
+    const body = replyDraft.body.trim();
     if (!body) return;
     // Mirror GUS: replying to an existing reply attaches the new
     // reply to the SAME parent post (Chatter threads are only one
@@ -131,8 +134,9 @@ export function ChatterPanel({
     const parentPostId = entry.kind === "comment" && entry.parentId
       ? entry.parentId
       : entry.id;
-    onSubmit(body, source, parentPostId);
-    setReplyDraft("");
+    const mentions = replyDraft.mentions.map((m) => m.userId);
+    onSubmit(body, source, parentPostId, mentions);
+    setReplyDraft({ body: "", mentions: [] });
     setReplyTo(null);
   }
 
@@ -162,18 +166,19 @@ export function ChatterPanel({
             </div>
           ) : isEditing ? (
             <div className="mt-1">
-              <textarea
+              <MentionInput
                 value={editDraft}
-                onChange={(ev) => setEditDraft(ev.target.value)}
+                onChange={setEditDraft}
                 rows={3}
                 autoFocus
+                disabled={editBusy}
                 className="w-full text-sm p-2 rounded-md surface-1"
-                style={{ resize: "vertical" }}
+                compact
               />
               <div className="flex justify-end gap-2 mt-1">
                 <button
                   type="button"
-                  onClick={() => { setEditing(null); setEditDraft(""); }}
+                  onClick={() => { setEditing(null); setEditDraft({ body: "", mentions: [] }); }}
                   disabled={editBusy}
                   className="pill surface-1 surface-1-hover text-[11px] disabled:opacity-30"
                 >
@@ -182,7 +187,7 @@ export function ChatterPanel({
                 <button
                   type="button"
                   onClick={() => submitEdit(e)}
-                  disabled={editBusy || !editDraft.trim() || editDraft.trim() === e.body.trim()}
+                  disabled={editBusy || !editDraft.body.trim() || editDraft.body.trim() === e.body.trim()}
                   className="pill bg-sky-500/25 text-sky-700 dark:text-sky-100 hover:bg-sky-500/35 disabled:opacity-30 text-[11px]"
                 >
                   {editBusy ? t("common.loading") : t("chatter.save")}
@@ -200,7 +205,7 @@ export function ChatterPanel({
                 type="button"
                 onClick={() => {
                   setReplyTo(replyTo === e.id ? null : e.id);
-                  setReplyDraft("");
+                  setReplyDraft({ body: "", mentions: [] });
                 }}
                 className="text-[11px] opacity-60 hover:opacity-100"
               >
@@ -211,7 +216,7 @@ export function ChatterPanel({
                   type="button"
                   onClick={() => {
                     setEditing(e.id);
-                    setEditDraft(e.body);
+                    setEditDraft({ body: e.body, mentions: [] });
                     setReplyTo(null);
                   }}
                   className="text-[11px] opacity-60 hover:opacity-100"
@@ -224,20 +229,20 @@ export function ChatterPanel({
 
           {replyTo === e.id && (
             <div className="mt-2">
-              <textarea
+              <MentionInput
                 value={replyDraft}
-                onChange={(ev) => setReplyDraft(ev.target.value)}
+                onChange={setReplyDraft}
                 rows={2}
                 autoFocus
                 placeholder={t("chatter.replyPlaceholder")}
                 className="w-full text-xs p-2 rounded-md surface-1"
-                style={{ resize: "vertical" }}
+                compact
               />
               <div className="flex justify-end mt-1">
                 <button
                   type="button"
                   onClick={() => submitReply(e)}
-                  disabled={!replyDraft.trim()}
+                  disabled={!replyDraft.body.trim()}
                   className="pill bg-sky-500/25 text-sky-700 dark:text-sky-100 hover:bg-sky-500/35 disabled:opacity-30 text-[11px]"
                 >
                   {t("chatter.post")}
@@ -251,13 +256,13 @@ export function ChatterPanel({
   }
 
   async function submitEdit(entry: FeedEntry) {
-    const body = editDraft.trim();
+    const body = editDraft.body.trim();
     if (!body || !onEdit) return;
     setEditBusy(true);
     try {
       await onEdit(entry, body);
       setEditing(null);
-      setEditDraft("");
+      setEditDraft({ body: "", mentions: [] });
     } finally {
       setEditBusy(false);
     }
@@ -289,19 +294,18 @@ export function ChatterPanel({
       {/* Top-level compose — hidden for read-only sources (email). */}
       {source !== "email" && (
         <div className="px-3 py-3 border-b border-soft shrink-0">
-          <textarea
+          <MentionInput
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={setDraft}
             rows={2}
             placeholder={t("chatter.placeholder")}
             className="w-full text-sm p-2 rounded-md surface-1"
-            style={{ resize: "vertical" }}
           />
           <div className="flex justify-end mt-1.5">
             <button
               type="button"
               onClick={submitTopLevel}
-              disabled={!draft.trim()}
+              disabled={!draft.body.trim()}
               className="pill bg-sky-500/25 text-sky-700 dark:text-sky-100 hover:bg-sky-500/35 disabled:opacity-30 text-xs"
             >
               {t("chatter.post")}

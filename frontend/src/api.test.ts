@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fetchActive, fetchDetails, fetchActivity, refresh } from "./api";
+import type { ChatStreamEvent, CasePatchProposal } from "./api";
 
 function lastFetchUrl(): string {
   const calls = (fetch as any).mock.calls as unknown[][];
@@ -70,5 +71,23 @@ describe("api", () => {
     const init = calls[calls.length - 1][1] as RequestInit;
     const headers = init.headers as Headers;
     expect(headers.get("X-Report-Id")).toBe("00OEE000001HkkD2AS");
+  });
+});
+
+describe("ChatStreamEvent", () => {
+  it("includes a proposal variant with discriminated proposal payload", () => {
+    const proposal: CasePatchProposal = {
+      kind2: "case_patch_proposal",
+      proposalId: "p_abcdef",
+      caseId: "500AAA",
+      caseNumber: "91886282",
+      assetId: null,
+      changes: [],
+    };
+    const ev: ChatStreamEvent = { kind: "proposal", proposal };
+    expect(ev.kind).toBe("proposal");
+    if (ev.kind === "proposal" && ev.proposal.kind2 === "case_patch_proposal") {
+      expect(ev.proposal.caseNumber).toBe("91886282");
+    }
   });
 });

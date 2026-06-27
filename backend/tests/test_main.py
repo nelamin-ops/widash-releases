@@ -111,6 +111,57 @@ def test_post_refresh_clears_cache(monkeypatch):
     app.dependency_overrides.clear()
 
 
+def test_user_search_rejects_bad_query(monkeypatch):
+    fake = make_fake_client()
+    app.dependency_overrides[get_gus_client] = lambda: fake
+    app.dependency_overrides[get_gus_clients] = lambda: [fake]
+    client = TestClient(app)
+    # Contains characters outside the allow-list (";", "%", multiple).
+    r = client.get("/api/sf/user-search?q=foo%3Bbar")
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "invalid_query"
+    app.dependency_overrides.clear()
+
+
+def test_user_search_empty_query_returns_empty(monkeypatch):
+    fake = make_fake_client()
+    app.dependency_overrides[get_gus_client] = lambda: fake
+    app.dependency_overrides[get_gus_clients] = lambda: [fake]
+    client = TestClient(app)
+    r = client.get("/api/sf/user-search?q=")
+    assert r.status_code == 200
+    assert r.json() == {"users": []}
+    # No SOQL should have been issued for an empty query.
+    fake._sf.query.assert_not_called()
+    app.dependency_overrides.clear()
+
+
+def test_user_search_happy_path(monkeypatch):
+    fake = make_fake_client()
+    fake._sf.query.return_value = {
+        "records": [
+            {"Id": "005000000000000001", "Name": "Max Mustermann",
+             "Username": "max@example.com"},
+            {"Id": "005000000000000002", "Name": "Maxine Tester",
+             "Username": "maxine@example.com"},
+        ],
+    }
+    app.dependency_overrides[get_gus_client] = lambda: fake
+    app.dependency_overrides[get_gus_clients] = lambda: [fake]
+    client = TestClient(app)
+    r = client.get("/api/sf/user-search?q=max")
+    assert r.status_code == 200
+    users = r.json()["users"]
+    assert len(users) == 2
+    assert users[0]["name"] == "Max Mustermann"
+    assert users[0]["photoUrl"] == "/api/avatar/005000000000000001"
+    assert users[0]["username"] == "max@example.com"
+    # Verify the query string escapes the search needle (no raw injection).
+    called_query = fake._sf.query.call_args[0][0]
+    assert "Name LIKE '%max%'" in called_query
+    app.dependency_overrides.clear()
+
+
 def test_auth_error_returns_401(monkeypatch):
     fake = MagicMock()
     fake._report_id = "00OEE000001HkkD2AS"
@@ -124,4 +175,47 @@ def test_auth_error_returns_401(monkeypatch):
     r = client.get("/api/rma/active")
     assert r.status_code == 401
     assert r.json()["error"] == "auth_expired"
+    app.dependency_overrides.clear()
+
+
+def test_post_comment_with_mentions_uses_connect_api(monkeypatch):
+    """Verify that when mentions are provided, the endpoint uses Connect API
+    with messageSegments instead of FeedItem.create."""
+    fake = make_fake_client()
+    # Mock sf.restful to capture the Connect API call.
+    fake._sf.restful = MagicMock(return_value={"id": "0D5AAAAAAAAAAAAAAA"})
+    # Mock FeedItem.create to verify it's NOT called.
+    fake._sf.FeedItem = MagicMock()
+    fake._sf.FeedItem.create = MagicMock()
+    app.dependency_overrides[get_gus_client] = lambda: fake
+    app.dependency_overrides[get_gus_clients] = lambda: [fake]
+    client = TestClient(app)
+    case_id = "500AAAAAAAAAAAAAAA"
+    r = client.post(
+        f"/api/case/{case_id}/comment",
+        json={
+            "source": "chatter",
+            "body": "kannst du?",
+            "mentions": ["005000000000000001", "005000000000000002"],
+        },
+    )
+    assert r.status_code == 200
+    # Verify sf.restful was called with Connect API path.
+    fake._sf.restful.assert_called_once()
+    call_args = fake._sf.restful.call_args
+    assert call_args[0][0] == f"connect/records/{case_id}/feed-elements"
+    assert call_args[1]["method"] == "POST"
+    payload = call_args[1]["json"]
+    assert payload["feedElementType"] == "FeedItem"
+    assert payload["subjectId"] == case_id
+    segments = payload["body"]["messageSegments"]
+    # Should have: Mention, Text(" "), Mention, Text(" "), Text("kannst du?")
+    assert len(segments) == 5
+    assert segments[0] == {"type": "Mention", "id": "005000000000000001"}
+    assert segments[1] == {"type": "Text", "text": " "}
+    assert segments[2] == {"type": "Mention", "id": "005000000000000002"}
+    assert segments[3] == {"type": "Text", "text": " "}
+    assert segments[4] == {"type": "Text", "text": "kannst du?"}
+    # Verify FeedItem.create was NOT called.
+    fake._sf.FeedItem.create.assert_not_called()
     app.dependency_overrides.clear()
