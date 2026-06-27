@@ -1,10 +1,21 @@
-"""Claude chat sidebar — read-only assistant over WiDash data.
+"""Claude chat sidebar — assistant over WiDash data.
 
 Auth: bearer fetched on demand via DevBar (`devbar auth claude`).
 Endpoint: SF Express LLM Gateway, Anthropic-API-compatible passthrough.
-Tools: read-only wrappers around existing GusClient / mom_client /
-coolan_client / patchplan code paths. No write tools — prompt
-injection cannot trigger a Salesforce mutation.
+
+Tools come in two flavours:
+  - Read tools: wrappers around existing GusClient / mom_client /
+    coolan_client / patchplan code paths.
+  - propose_* tools (propose_case_patch / propose_chatter_post /
+    propose_chatter_edit): these DO NOT write. They validate the
+    requested change and emit a proposal the UI renders as a confirm
+    card. The actual Salesforce mutation only happens later, when the
+    user approves the card and the frontend calls the dedicated write
+    endpoints in main.py (themselves gated by the Writes-mode pill).
+
+So prompt injection still cannot trigger a Salesforce mutation on its
+own — the worst it can do is surface a proposal the user must then
+explicitly confirm.
 
 The router is mounted by main.py and depends on the same
 get_gus_clients dependency every other endpoint uses, so the active
@@ -54,12 +65,22 @@ ALLOWED_MODELS = {"claude-sonnet-4-6", "claude-opus-4-7"}
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 # Hard upper bound on a single completion. Keeps cost predictable and
-# prevents Claude from running away on a long generation.
-MAX_OUTPUT_TOKENS = 2048
+# prevents Claude from running away on a long generation. Both exposed
+# models have a 200k context window, so this is a cost/latency knob,
+# not a context-fit one.
+MAX_OUTPUT_TOKENS = 4096
 
-# Conservative cap on conversation length sent to the model. The
-# frontend trims older turns; the backend enforces it as a safety net.
-MAX_HISTORY_MESSAGES = 40
+# How many of the most recent messages we keep when talking to the
+# model. Older turns beyond this are dropped gracefully (oldest first)
+# in _run_stream — the conversation keeps working, it just "forgets"
+# the distant past instead of erroring out.
+MAX_HISTORY_MESSAGES = 120
+
+# Hard ceiling on the request payload itself (abuse / accidental-huge-
+# history guard, enforced at the Pydantic layer). Decoupled from
+# MAX_HISTORY_MESSAGES: the frontend may legitimately send a long
+# conversation; we accept it and trim server-side rather than 422-ing.
+MAX_REQUEST_MESSAGES = 500
 
 # Hard cap on tool-call rounds within a single user turn. Each round
 # is one model call + one tool batch. Plenty for normal use; bounds
@@ -533,7 +554,17 @@ TOOLS = [
 # Tool executor
 # ---------------------------------------------------------------------------
 
-def _truncate_for_model(value: Any, max_chars: int = 6000) -> str:
+def _trim_history(history: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Keep only the most recent ``limit`` messages, oldest dropped first,
+    then strip any leading non-user turn (Anthropic requires the first
+    message to be role=user). Returns a new list; never mutates input."""
+    trimmed = history[-limit:] if len(history) > limit else list(history)
+    while trimmed and trimmed[0].get("role") != "user":
+        trimmed.pop(0)
+    return trimmed
+
+
+def _truncate_for_model(value: Any, max_chars: int = 12000) -> str:
     """Serialise tool output as compact JSON, capped to keep the
     context lean. Long lists tend to push the model out of the
     instruction-following sweet spot and burn tokens."""
@@ -1014,7 +1045,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_HISTORY_MESSAGES)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_REQUEST_MESSAGES)
     model: str = DEFAULT_MODEL
 
 
@@ -1030,8 +1061,10 @@ def _system_prompt(active_sites: list[str]) -> str:
     today = date.today().isoformat()
     sites = ", ".join(active_sites) if active_sites else "the active report"
     return (
-        "You are WiDash's read-only assistant for Salesforce Datacenter "
-        "Engineering RMA workflows. The user is a DCEng engineer who "
+        "You are WiDash's assistant for Salesforce Datacenter "
+        "Engineering RMA workflows. You read data freely and can "
+        "*propose* changes the user confirms — you never write directly. "
+        "The user is a DCEng engineer who "
         "owns hardware in the active report's sites. Today is "
         f"{today}. Active sites: {sites}.\n\n"
         "How to behave:\n"
@@ -1140,6 +1173,7 @@ async def _run_stream(
     the frontend. SSE events:
       delta  → append to current assistant message
       tool   → {name, status: 'started'|'finished'}
+      usage  → {input, output}  running token total (live, mid-stream)
       done   → {usage: {…}}  end of conversation
       error  → {message}     terminal failure
     """
@@ -1172,6 +1206,14 @@ async def _run_stream(
     if not history:
         yield _sse("error", {"message": "no_messages"})
         return
+
+    # Graceful memory window: keep only the most recent turns so a long
+    # chat keeps working (it "forgets" the distant past) instead of
+    # erroring once the conversation grows past the cap.
+    history = _trim_history(history, MAX_HISTORY_MESSAGES)
+    if not history:
+        yield _sse("error", {"message": "no_messages"})
+        return
     system = _system_prompt(active_sites)
 
     total_input = 0
@@ -1183,6 +1225,12 @@ async def _run_stream(
         tool_uses: list[dict[str, Any]] = []
         assistant_blocks: list[dict[str, Any]] = []
         try:
+            # Per-round live token counts, streamed so the UI can show a
+            # running meter. input arrives at message_start, output grows
+            # over message_delta events. We report the turn-wide running
+            # total (finished rounds + this round so far).
+            round_input = 0
+            round_output = 0
             with client.messages.stream(
                 model=body.model,
                 max_tokens=MAX_OUTPUT_TOKENS,
@@ -1198,6 +1246,20 @@ async def _run_stream(
                             text = getattr(delta, "text", "") or ""
                             if text:
                                 yield _sse("delta", {"text": text})
+                    elif et == "message_start":
+                        usage = getattr(getattr(event, "message", None), "usage", None)
+                        round_input = getattr(usage, "input_tokens", 0) or 0
+                        yield _sse("usage", {
+                            "input": total_input + round_input,
+                            "output": total_output + round_output,
+                        })
+                    elif et == "message_delta":
+                        usage = getattr(event, "usage", None)
+                        round_output = getattr(usage, "output_tokens", 0) or 0
+                        yield _sse("usage", {
+                            "input": total_input + round_input,
+                            "output": total_output + round_output,
+                        })
                 final = stream.get_final_message()
         except APIError as e:
             logger.exception("Anthropic API error")

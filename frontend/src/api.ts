@@ -586,6 +586,7 @@ export type ChatStreamEvent =
   | { kind: "delta"; text: string }
   | { kind: "tool"; name: string; status: "started" | "finished" }
   | { kind: "proposal"; proposal: ProposalPayload }
+  | { kind: "usage"; input: number; output: number }
   | { kind: "done"; usage?: { input: number; output: number } }
   | { kind: "error"; message: string; code?: string };
 
@@ -685,6 +686,8 @@ export async function* streamChat(
             };
           }
         }
+        else if (event === "usage")
+          yield { kind: "usage", input: data.input ?? 0, output: data.output ?? 0 };
         else if (event === "done")
           yield { kind: "done", usage: data.usage };
         else if (event === "error")

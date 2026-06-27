@@ -90,4 +90,12 @@ describe("ChatStreamEvent", () => {
       expect(ev.proposal.caseNumber).toBe("91886282");
     }
   });
+
+  it("includes a live usage variant carrying running token totals", () => {
+    const ev: ChatStreamEvent = { kind: "usage", input: 1200, output: 350 };
+    expect(ev.kind).toBe("usage");
+    if (ev.kind === "usage") {
+      expect(ev.input + ev.output).toBe(1550);
+    }
+  });
 });

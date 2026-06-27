@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { IconButton } from "./IconButton";
-import { useLanguage } from "../hooks/useLanguage";
+import { useLanguage, localeFor } from "../hooks/useLanguage";
 import { streamChat, type ChatMessage, patchCase, patchAsset, postCaseComment, patchChatterEntry, type ProposalPayload } from "../api";
 import { ProposalCard } from "./ProposalCard";
 import { EditConfirmModal } from "./EditConfirmModal";
@@ -191,6 +191,22 @@ function formatTokens(n: number): string {
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1).replace(/\.0$/, "")}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s % 60)}s`;
+}
+
+/** Small "HH:MM · DD.MM.YYYY" stamp using the browser locale. */
+function formatStamp(at: number, locale: string): string {
+  const d = new Date(at);
+  const time = d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+  const date = d.toLocaleDateString(locale, { day: "2-digit", month: "2-digit", year: "numeric" });
+  return `${time} · ${date}`;
+}
+
 interface ToolEvent {
   name: string;
   status: "started" | "finished";
@@ -224,6 +240,10 @@ interface RenderedMessage extends ChatMessage {
   streaming?: boolean;
   /** Proposals attached to this assistant message. */
   proposalGroups?: ProposalGroup[];
+  /** Completion stamp for assistant messages: wall-clock the reply
+   *  finished, how long it took, and the turn's token total. Rendered
+   *  as a small footer under the bubble. */
+  meta?: { at: number; durationMs: number; tokens: number };
 }
 
 interface Conversation {
@@ -312,14 +332,15 @@ function loadInitialActiveId(conversations: Conversation[]): string | null {
 interface ChatSidebarProps extends ChatLinkHandlers {}
 
 /** Floating chat sidebar — pill bottom-right opens an overlay panel.
- *  Read-only assistant. Conversations are persisted to localStorage
+ *  Reads freely; writes only via confirm-gated proposals. Conversations
+ *  are persisted to localStorage
  *  so closing the panel (or reloading the tab) doesn't lose them.
  *  Multiple conversations can coexist; the history list at the top
  *  of the panel lets the user switch back and forth, start a new
  *  one, or delete an old one. */
 export function ChatSidebar(props: ChatSidebarProps = {}) {
   const linkHandlers: ChatLinkHandlers = props;
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const writeMode = useWriteMode();
   const [open, setOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -331,6 +352,17 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
   );
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  // Live "working" indicator for the in-flight turn: what Claude is
+  // doing right now + running token total + when the turn started. Null
+  // when idle. Kept out of the persisted message so it never lands in
+  // localStorage. startedAt drives the seconds counter in WorkingLine.
+  const [work, setWork] = useState<{
+    phase: "thinking" | "tool" | "writing";
+    tool?: string;
+    input: number;
+    output: number;
+    startedAt: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Last user message we tried to send — surfaced via a Retry button
   // in the error banner so a transient gateway failure or stale
@@ -618,6 +650,8 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
       }),
     );
     setBusy(true);
+    const turnStartedAt = Date.now();
+    setWork({ phase: "thinking", input: 0, output: 0, startedAt: turnStartedAt });
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -649,6 +683,13 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
     // kept across all proposal events of THIS streamChat run
     const currentTurnGroups = new Map<string, string>();   // toolName → groupId
 
+    // The gateway only reports output_tokens once, at the end of each
+    // round — so we can't show a live count from the wire. Instead we
+    // estimate output from streamed characters (~4 chars/token) as text
+    // arrives, and let the real `usage` numbers override when they land.
+    let streamedChars = 0;
+    let realInput = 0;
+
     try {
       for await (const ev of streamChat(
         { messages: baseHistory, model: modelUsed },
@@ -656,6 +697,14 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
       )) {
         if (ev.kind === "delta") {
           mutateTail((m) => ({ ...m, content: m.content + ev.text }));
+          streamedChars += ev.text.length;
+          // First text after a tool round means Claude is composing again.
+          setWork((w) =>
+            w
+              ? { ...w, phase: "writing", tool: undefined,
+                  output: Math.max(w.output, Math.ceil(streamedChars / 4)) }
+              : w,
+          );
         } else if (ev.kind === "tool") {
           mutateTail((m) => ({
             ...m,
@@ -664,6 +713,18 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
               { name: ev.name, status: ev.status, ts: Date.now() },
             ],
           }));
+          setWork((w) =>
+            w
+              ? ev.status === "started"
+                ? { ...w, phase: "tool", tool: ev.name }
+                : { ...w, phase: "thinking", tool: undefined }
+              : w,
+          );
+        } else if (ev.kind === "usage") {
+          realInput = ev.input;
+          setWork((w) =>
+            w ? { ...w, input: ev.input, output: Math.max(w.output, ev.output) } : w,
+          );
         } else if (ev.kind === "proposal") {
           // Map is the source of truth for "which group within THIS
           // streamChat run holds proposals of this tool-name". Look up /
@@ -700,7 +761,16 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
             return { ...m, proposalGroups: next };
           });
         } else if (ev.kind === "done") {
-          mutateTail((m) => ({ ...m, streaming: false }));
+          // Prefer the real end-of-turn usage; fall back to the
+          // estimate accumulated during the stream.
+          const tokens = ev.usage
+            ? ev.usage.input + ev.usage.output
+            : realInput + Math.ceil(streamedChars / 4);
+          mutateTail((m) => ({
+            ...m,
+            streaming: false,
+            meta: { at: Date.now(), durationMs: Date.now() - turnStartedAt, tokens },
+          }));
           if (ev.usage) recordUsage(modelUsed, ev.usage.input, ev.usage.output);
         } else if (ev.kind === "error") {
           setError(ev.message || "error");
@@ -728,6 +798,7 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
       mutateTail((m) => ({ ...m, streaming: false }));
     } finally {
       setBusy(false);
+      setWork(null);
       abortRef.current = null;
     }
   }
@@ -1093,8 +1164,8 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
               )}
 
               {/* Hint banner — first thing the user sees in an empty
-                  conversation. Read-only + logging caveat in two
-                  lines so they know what they're working with. */}
+                  conversation. Capability + logging caveat so they
+                  know what they're working with. */}
               {messages.length === 0 && (
                 <div className="px-4 py-3 text-xs opacity-70">
                   {t("chat.intro")}
@@ -1111,12 +1182,14 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
                     key={i}
                     message={m}
                     t={t}
+                    locale={localeFor(lang)}
                     linkHandlers={linkHandlers}
                     blocked={!!activeConfirmGroupId}
                     onConfirmGroup={confirmGroup}
                     onDiscardGroup={discardGroup}
                   />
                 ))}
+                {work && <WorkingLine work={work} t={t} />}
                 {error && (
                   <div className="px-3 py-2 rounded text-xs border border-red-500/40 text-red-700 dark:text-red-300 bg-red-500/10 flex items-start gap-2">
                     <div className="flex-1 min-w-0 break-words">
@@ -1305,11 +1378,64 @@ export function ChatSidebar(props: ChatSidebarProps = {}) {
   );
 }
 
+// Cycling glyphs for the working spinner — same spirit as the
+// Claude Code star. Plain unicode, no asset / lib needed.
+const WORK_GLYPHS = ["✶", "✷", "✸", "✹", "✺", "✦", "✧", "✩"];
+
+/** Live "working" indicator shown below the message log while a turn
+ *  streams. Cycling star + rainbow-swept state text + seconds + running
+ *  token total. All three timers are local to this component so they
+ *  don't re-render the whole sidebar. */
+function WorkingLine({
+  work, t,
+}: {
+  work: { phase: "thinking" | "tool" | "writing"; tool?: string; input: number; output: number; startedAt: number };
+  t: (k: any, vars?: Record<string, string | number>) => string;
+}) {
+  const [glyph, setGlyph] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const g = setInterval(() => setGlyph((i) => (i + 1) % WORK_GLYPHS.length), 110);
+    const s = setInterval(() => setElapsed(Math.floor((Date.now() - work.startedAt) / 1000)), 250);
+    return () => { clearInterval(g); clearInterval(s); };
+  }, [work.startedAt]);
+
+  const label =
+    work.phase === "tool"
+      ? t("chat.workTool", { tool: prettyToolName(work.tool ?? "") })
+      : work.phase === "writing"
+        ? t("chat.workWriting")
+        : t("chat.workThinking");
+
+  const tokens = work.input + work.output;
+
+  return (
+    <div className="flex items-center gap-2 text-xs opacity-80" aria-live="polite">
+      <span className="text-sky-400 w-3 text-center" aria-hidden>{WORK_GLYPHS[glyph]}</span>
+      <span
+        className="font-medium bg-clip-text text-transparent bg-[length:200%_auto] animate-rainbow-sweep"
+        style={{
+          backgroundImage:
+            "linear-gradient(90deg,#ff0080,#ffae00,#00ff80,#00d4ff,#8000ff,#ff0080)",
+        }}
+      >
+        {label}…
+      </span>
+      <span className="opacity-50 tabular-nums">
+        {elapsed}s
+        {tokens > 0 && <> · {t("chat.workTokens", { tokens: formatTokens(tokens) })}</>}
+      </span>
+    </div>
+  );
+}
+
 function MessageBubble({
-  message, t, linkHandlers, blocked, onConfirmGroup, onDiscardGroup,
+  message, t, locale, linkHandlers, blocked, onConfirmGroup, onDiscardGroup,
 }: {
   message: RenderedMessage;
-  t: (k: any) => string;
+  t: (k: any, vars?: Record<string, string | number>) => string;
+  locale: string;
   linkHandlers: ChatLinkHandlers;
   blocked: boolean;
   onConfirmGroup: (g: ProposalGroup) => void;
@@ -1336,25 +1462,36 @@ function MessageBubble({
           )}
         </div>
       )}
-      <div
-        className={
-          "px-3 py-2 rounded-lg max-w-[90%] break-words " +
-          (isUser
-            ? "bg-sky-600 text-white whitespace-pre-wrap"
-            : "surface-1 text-current")
-        }
-      >
-        {isUser ? (
-          message.content
-        ) : message.content ? (
-          <AssistantMarkdown
-            content={message.content}
-            linkHandlers={linkHandlers}
-          />
-        ) : message.streaming ? (
-          "…"
-        ) : null}
-      </div>
+      {/* Empty streaming assistant bubble is suppressed — the
+          WorkingLine below the log is the live indicator instead. */}
+      {(isUser || message.content) && (
+        <div
+          className={
+            "px-3 py-2 rounded-lg max-w-[90%] break-words " +
+            (isUser
+              ? "bg-sky-600 text-white whitespace-pre-wrap"
+              : "surface-1 text-current")
+          }
+        >
+          {isUser ? (
+            message.content
+          ) : (
+            <AssistantMarkdown
+              content={message.content}
+              linkHandlers={linkHandlers}
+            />
+          )}
+        </div>
+      )}
+      {/* Completion stamp: duration · tokens · time/date. Assistant
+          messages only, once the turn has finished. */}
+      {message.meta && (
+        <div className="text-[10px] opacity-40 mt-0.5 tabular-nums">
+          {formatDuration(message.meta.durationMs)}
+          {" · "}{t("chat.workTokens", { tokens: formatTokens(message.meta.tokens) })}
+          {" · "}{formatStamp(message.meta.at, locale)}
+        </div>
+      )}
       {(message.proposalGroups ?? []).map((g) => (
         <ProposalCard
           key={g.groupId}

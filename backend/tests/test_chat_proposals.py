@@ -241,3 +241,56 @@ def test_propose_chatter_post_with_mentions(monkeypatch):
         {"userId": "005000000000000001", "displayName": "Max Mustermann"},
         {"userId": "005000000000000002", "displayName": "Alex Tester"},
     ]
+
+
+# --- History trimming / truncation limits ---------------------------------
+
+from backend.chat import _trim_history, _truncate_for_model
+
+
+def _msgs(n):
+    """Build n alternating user/assistant turns starting with user."""
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+        for i in range(n)
+    ]
+
+
+def test_trim_history_under_limit_is_unchanged():
+    h = _msgs(5)
+    out = _trim_history(h, 120)
+    assert out == h
+    assert out is not h            # returns a copy, never mutates input
+
+
+def test_trim_history_keeps_most_recent():
+    h = _msgs(10)                  # m0..m9 (m6 is user: 6 % 2 == 0)
+    out = _trim_history(h, 4)
+    # Keeps the last 4; m6 already starts on a user turn, no extra drop.
+    assert [m["content"] for m in out] == ["m6", "m7", "m8", "m9"]
+    assert out[0]["role"] == "user"
+
+
+def test_trim_history_first_message_is_always_user():
+    # Even when the trimmed window starts on an assistant turn, the
+    # result must begin with a user message (Anthropic API requirement).
+    h = _msgs(6)
+    out = _trim_history(h, 3)      # window m3(assistant) m4 m5
+    assert out[0]["role"] == "user"
+
+
+def test_trim_history_all_assistant_returns_empty():
+    h = [{"role": "assistant", "content": "x"}]
+    assert _trim_history(h, 120) == []
+
+
+def test_truncate_for_model_caps_long_output():
+    out = _truncate_for_model({"big": "x" * 50000})
+    assert len(out) <= 12000 + len(" …[truncated]")
+    assert out.endswith("…[truncated]")
+
+
+def test_truncate_for_model_short_output_intact():
+    out = _truncate_for_model({"ok": "small"})
+    assert out == '{"ok": "small"}'
+    assert "truncated" not in out

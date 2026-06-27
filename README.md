@@ -151,6 +151,15 @@ scroll, optional pin to dock above the open sheet).
   + EmailMessage. Avatars proxied through the backend so SF profile
   photos work in the browser. Edit-in-place for your own posts.
   Replies thread one level deep (matching GUS).
+- **@-Mentions** in a top-level Chatter post: type `@` to open a live
+  user-search dropdown (avatars + name + username), pick someone, and
+  the post is written through the Chatter Connect API as a real
+  semantic mention — the mentioned user gets notified and the name is
+  clickable in Lightning, exactly like a native GUS mention. Spaces are
+  part of the query so `@Max Mustermann` disambiguates; the dropdown
+  closes on Newline / Escape / pick. Set mentions render blue in the
+  compose box. (Replies, private case comments and edits stay plain
+  text for now.)
 - **Polling**: case detail + chatter feed auto-refresh every 30s
   when the tab is open. Pauses while you have unsaved drafts /
   open confirm modal / in-flight save.
@@ -217,11 +226,15 @@ overlay backed by mom.dmz internal APIs.
 
 ### AI chat sidebar
 Dockable chat panel (slides in from the left, resizable via the right
-edge) backed by Salesforce's internal LLM gateway. Read-only assistant —
-no writes are issued, no data is sent server-side. Claude (Sonnet 4.6 /
+edge) backed by Salesforce's internal LLM gateway. Claude (Sonnet 4.6 /
 Opus 4.7 selectable) has access to a curated tool set scoped to the
-active report:
+active report. Read tools never mutate anything; the `propose_*` tools
+validate a requested change and surface a confirm card but **do not
+write** — the actual Salesforce mutation only happens after you approve
+the card (and only when the Writes-mode pill is armed). So prompt
+injection can at worst raise a proposal you must explicitly confirm.
 
+**Read tools:**
 - `list_rmas` / `list_status_tickets` — count and list cases. Tickets
   carry pre-rendered `caseLink` Markdown so every cited case-number
   ends up clickable in the reply.
@@ -232,6 +245,22 @@ active report:
 - `temps_overview` / `temps_rack` — mom.dmz live temperatures.
 - `coolan_components` — component health for a case.
 - `patchplan_search` — cable lookup by hostname / room+rack / query.
+
+**Propose tools (validate-only, confirm-gated):**
+- `propose_case_patch` — proposes one or more case/asset field edits.
+  Structural fields are blacklisted; unknown / non-updateable fields
+  are rejected at validation time.
+- `propose_chatter_post` — proposes a Chatter post / reply / private
+  case comment, optionally with `@`-mentions.
+- `propose_chatter_edit` — proposes editing one of *your own* posts;
+  ownership is checked before the card is shown.
+
+**Confirm cards & batching.** Each proposal renders as a `ProposalCard`
+with a diff / preview. Multiple proposals of the same tool-type from one
+turn group into a single batch card with an **Alle bestätigen** button
+that opens a table modal listing every affected case. Confirming runs
+the real write through the same guarded endpoints the manual UI uses;
+each row reports applied ✓ / failed ✗ independently.
 
 **Rendering.** Replies are rendered as GitHub-Flavored Markdown
 (`react-markdown` + `remark-gfm`): tables, lists, fenced code blocks,
@@ -262,6 +291,18 @@ conversation, start a fresh one with **+**, or delete a single
 conversation from the list. The trash icon clears only the *active*
 conversation.
 
+**Working indicator.** While a turn streams, a live line under the
+message log shows what Claude is doing — a cycling star, a
+rainbow-swept state label (*Thinking* → *Running <tool>* → *Writing*),
+the elapsed seconds, and a running token count. The gateway only
+reports `output_tokens` once per round, so the live output figure is
+estimated from streamed characters and replaced by the exact number
+when the round ends. Each finished assistant message then carries a
+small completion stamp: `<duration> · <tokens> · <time> · <date>`
+(persisted with the message, so it survives a reload). The state and
+running token total ride on a `usage` SSE event the backend emits
+mid-stream alongside the existing `delta` / `tool` / `done` events.
+
 **Token & cost footer.** The composer footer carries a running
 `Today: <tok> ($X.XX) · Month: <tok> ($X.XX)` line. Counts only the
 chats run inside WiDash — DevBar's global indicator covers everything
@@ -271,14 +312,25 @@ else. Costs are computed locally with Anthropic's public pricing
 LLM Gateway is a transparent passthrough, so the local figure tracks
 what the engineer's SF identity gets billed.
 
+**Conversation memory & limits.** Both models have a 200k-token context
+window, so the limits are cost/latency knobs, not context-fit ones, and
+live as named constants in `backend/chat.py`. The backend keeps a
+graceful memory window: when a conversation grows past the cap it drops
+the *oldest* turns (and any leading non-user turn, which the Anthropic
+API forbids) rather than erroring — a long chat keeps working, it just
+forgets the distant past. A separate, much larger ceiling on the raw
+request payload guards against an accidentally huge history. Single-
+completion output and per-tool-result size are likewise capped to keep
+each turn bounded. Tune the constants together with the cost meter in
+mind.
+
 **Error handling & retry.** Streaming failures (gateway down, stale
-DevBar token, Pydantic 422 on a corrupted history) surface as an
-inline red banner with the Pydantic field name when applicable. A
-**↻ Retry** button re-sends the last user message after dropping
-the failed turn from the conversation, so a transient failure
-doesn't lose the question. Empty assistant placeholders left behind
-by an aborted stream are filtered out of the history on the next
-send, both client-side and server-side.
+DevBar token, a malformed request) surface as an inline red banner with
+the Pydantic field name when applicable. A **↻ Retry** button re-sends
+the last user message after dropping the failed turn from the
+conversation, so a transient failure doesn't lose the question. Empty
+assistant placeholders left behind by an aborted stream are filtered
+out of the history on the next send, both client-side and server-side.
 
 Useful for "what's the highest-priority RMA in pending drain right
 now", "what's room 14.4 looking like temperature-wise", or summarising
