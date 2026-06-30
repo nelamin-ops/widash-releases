@@ -1,4 +1,4 @@
-__version__ = "fix: Suchtreffer-Öffnen crasht nicht mehr (White-Screen) + ErrorBoundary"
+__version__ = "1.22"
 
 # GitHub-Repo das für Releases genutzt wird.
 # Format: "owner/repo"
