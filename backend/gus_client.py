@@ -39,11 +39,16 @@ def install_connection_retry(sf: Salesforce) -> None:
 from . import coolan_client
 from .models import (
     CoolanLink,
+    DetailsBlock,
+    DetailsSegment,
     MyRtsTicket,
     PrioBreakdown,
     RmaActiveResponse,
     RmaTicket,
     StatusBucket,
+    WorkItem,
+    WorkItemDetail,
+    WorkItemHistoryEvent,
 )
 
 # Salesforce 15- or 18-character record IDs are alphanumeric only. The IDs we
@@ -51,6 +56,19 @@ from .models import (
 # guard keeps the f-string interpolation safe if a future code path ever feeds
 # an unvalidated value into _query_history / _query_feed / _query_active_case_ids.
 _SF_ID_RE = re.compile(r"^[a-zA-Z0-9]{15,20}$")
+
+# Site tokens / prefixes that the work-item query interpolates into a
+# SOQL LIKE clause. They come from the active report's own location
+# values, but get re-validated here before touching the query string so
+# a malformed report row can never widen the SOQL surface. A token is a
+# site code like "FRA3" / "CDG1A"; a prefix is the bare region like
+# "FRA" / "CDG".
+_SITE_TOKEN_RE = re.compile(r"^[A-Z]{2,4}[0-9]{0,3}[A-Z]?$")
+_SITE_PREFIX_RE = re.compile(r"^[A-Z]{2,4}$")
+
+# GUS work-item id ("W-23124643"). Used to allow-list the work-item
+# detail lookup before the value reaches SOQL.
+_WORK_ID_RE = re.compile(r"^W-[0-9]{4,12}$")
 
 
 def _safe_ids_clause(ids: list[str]) -> str:
@@ -127,6 +145,7 @@ _MENTION_LINK_RE = re.compile(
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 import html as _html
+from html.parser import HTMLParser as _HTMLParser
 
 
 def _strip_html(text: str) -> str:
@@ -138,6 +157,196 @@ def _strip_html(text: str) -> str:
     text = _TAG_RE.sub("", text)
     text = _html.unescape(text)
     return " ".join(text.split())
+
+
+# Heading tags collapse to a single "h" block kind (we don't need h1..h6
+# levels in the sheet); list/table tags drive their own block kinds.
+_DETAILS_HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+# Embedded chatter/feed images reference a Salesforce ContentDocument by
+# id ("sfdc://069…"). We only ever accept that exact shape — the id is
+# allow-listed here and again at the proxy endpoint before it touches SF.
+_SFDC_IMG_RE = re.compile(r"^sfdc://(069[A-Za-z0-9]{12,15})$", re.IGNORECASE)
+
+
+class _DetailsParser(_HTMLParser):
+    """Parse Details__c HTML into structured blocks of inline segments.
+
+    GUS work items carry real rich-text here — paragraphs, headings,
+    bullet/numbered lists, and big asset *tables* (40+ rows). We emit our
+    own structured model (blocks → segments, text + validated http/https
+    link + bold) rather than passing HTML to the browser; the standing
+    rule is the frontend never trusts backend HTML. Anchors with a
+    non-http(s) href (``javascript:`` / ``data:`` / relative) degrade to
+    plain text so a hostile link can't smuggle a scheme to the click layer.
+
+    The parser is a small state machine: a current block accumulates
+    inline segments; list and table tags open/close nested containers
+    (list items, table rows, table cells). Unknown/decorative tags
+    (``span``, ``br``, ``strong``…) only toggle inline state, never
+    structure, so malformed nesting degrades gracefully instead of
+    raising.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[dict] = []
+        self._cur: Optional[dict] = None     # current block being built
+        self._href: str = ""
+        self._bold = 0                       # nesting depth of bold tags
+        # Table state: list[row] where row is list[cell] and cell is
+        # list[segment]; plus the cell currently receiving text.
+        self._table: Optional[list] = None
+        self._row: Optional[list] = None
+        self._cell: Optional[list] = None
+
+    # -- helpers ---------------------------------------------------------
+    def _open(self, kind: str) -> None:
+        self._cur = {"kind": kind, "segments": [], "items": [], "rows": []}
+
+    def _close(self) -> None:
+        if self._cur and (
+            self._cur["segments"] or self._cur["items"] or self._cur["rows"]
+        ):
+            self.blocks.append(self._cur)
+        self._cur = None
+
+    def _sink(self) -> Optional[list]:
+        """Where inline text currently lands: a table cell, the open list
+        item, or the current block's segment list."""
+        if self._cell is not None:
+            return self._cell
+        if self._cur is None:
+            return None
+        if self._cur["kind"] in ("ul", "ol") and self._cur["items"]:
+            return self._cur["items"][-1]
+        return self._cur["segments"]
+
+    # -- HTMLParser hooks ------------------------------------------------
+    def handle_starttag(self, tag, attrs):
+        if tag in ("p", "div"):
+            self._close(); self._open("p")
+        elif tag in _DETAILS_HEADINGS:
+            self._close(); self._open("h")
+        elif tag in ("ul", "ol"):
+            self._close(); self._open(tag)
+        elif tag == "li":
+            if self._cur and self._cur["kind"] in ("ul", "ol"):
+                self._cur["items"].append([])
+        elif tag == "table":
+            self._close(); self._open("table"); self._table = self._cur["rows"]
+        elif tag == "tr" and self._table is not None:
+            self._row = []
+            self._table.append(self._row)
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+            self._row.append(self._cell)
+        elif tag == "a":
+            href = (dict(attrs).get("href") or "").strip()
+            low = href.lower()
+            self._href = href if (
+                low.startswith("http://") or low.startswith("https://")
+            ) else ""
+        elif tag == "img":
+            # Embedded chatter image — keep only the whitelisted
+            # sfdc://069… ContentDocument reference; anything else (data:,
+            # http:, on-error handlers) is dropped, never rendered.
+            src = (dict(attrs).get("src") or "").strip()
+            alt = (dict(attrs).get("alt") or "").strip()
+            m = _SFDC_IMG_RE.match(src)
+            if m:
+                sink = self._sink()
+                if sink is None:
+                    self._open("p")
+                    sink = self._cur["segments"]
+                sink.append({
+                    "text": alt, "href": "", "bold": False,
+                    "imageId": m.group(1),
+                })
+        elif tag in ("strong", "b"):
+            self._bold += 1
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._href = ""
+        elif tag in ("strong", "b"):
+            self._bold = max(0, self._bold - 1)
+        elif tag in ("td", "th"):
+            self._cell = None
+        elif tag == "tr":
+            self._row = None
+        elif tag == "table":
+            self._table = None
+            self._close()
+        elif tag in ("p", "div", "ul", "ol") + tuple(_DETAILS_HEADINGS):
+            self._close()
+
+    def handle_data(self, data):
+        text = data.strip()
+        if not text:
+            return
+        sink = self._sink()
+        if sink is None:
+            self._open("p")
+            sink = self._cur["segments"]
+        sink.append({
+            "text": text, "href": self._href,
+            "bold": bool(self._bold), "imageId": "",
+        })
+
+    def result(self) -> list[dict]:
+        self._close()
+        return self.blocks
+
+
+def _parse_details(raw: str) -> tuple[str, list[dict]]:
+    """Return (plain_text, structured_blocks) for a Details__c value.
+
+    The flattened plain text feeds chat/search; the blocks feed the
+    sheet's rich rendering. Falls back to a single plain paragraph if the
+    parser ever chokes — the field must never blank the sheet."""
+    if not raw:
+        return "", []
+    try:
+        p = _DetailsParser()
+        p.feed(raw)
+        blocks = p.result()
+    except Exception:
+        logger.exception("details parse failed")
+        flat = _strip_html(raw)
+        return flat, (
+            [{"kind": "p",
+              "segments": [{"text": flat, "href": "", "bold": False, "imageId": ""}],
+              "items": [], "rows": []}] if flat else []
+        )
+
+    def _texts(block: dict):
+        yield from (s["text"] for s in block["segments"])
+        for item in block["items"]:
+            yield from (s["text"] for s in item)
+        for row in block["rows"]:
+            for cell in row:
+                yield from (s["text"] for s in cell)
+
+    plain = " ".join(t for b in blocks for t in _texts(b))
+    return plain, blocks
+
+
+def _seg(s: dict) -> DetailsSegment:
+    return DetailsSegment(
+        text=s["text"], href=s.get("href") or "", bold=bool(s.get("bold")),
+        imageId=s.get("imageId") or "",
+    )
+
+
+def _details_block(b: dict) -> DetailsBlock:
+    """Convert one parser dict into the DetailsBlock response model."""
+    return DetailsBlock(
+        kind=b["kind"],
+        segments=[_seg(s) for s in b["segments"]],
+        items=[[_seg(s) for s in item] for item in b["items"]],
+        rows=[[[_seg(s) for s in cell] for cell in row] for row in b["rows"]],
+    )
 
 
 def _walk_leaf_keys(groupings: list, path: list[str]) -> dict[str, tuple[str, ...]]:
@@ -469,6 +678,370 @@ class GusClient:
             for i in (1, 2, 3):
                 out.add(f"{p}{i}")
         return sorted(out)
+
+    def get_work_items(self, limit: int = 200) -> list[WorkItem]:
+        """Return open GUS work items (ADM_Work__c) for the active
+        report's region(s), newest-modified first.
+
+        Region scoping mirrors the rest of the client: it derives the
+        site codes from the active report (FRA1/2/3 → prefix FRA, CDG
+        → CDG, …) with NO hardcoded site. A work item counts as "this
+        region" when either
+
+          - its scrum team is ``DCENG-<prefix>…`` (the site's own team), OR
+          - its subject begins with a full site code (``FRA3 …``)
+
+        The second arm matters because cross-team work for a site —
+        e.g. the *Data Center Compliance* team's media-destruction
+        stories — lives under a different scrum team but always names
+        the site in the subject. Filtering on team alone would hide it.
+
+        The site tokens are allow-listed against ``_SITE_TOKEN_RE`` /
+        ``_SITE_PREFIX_RE`` before they touch the SOQL string, so even
+        though they originate from authenticated report data they can
+        never widen the query. Returns an empty list when the report
+        hasn't loaded yet — same defensive contract as the CaseHistory
+        scoping paths.
+        """
+        if self._sf is None:
+            return []
+        sites = self._report_site_codes()
+        if not sites:
+            return []
+        site_tokens = [s for s in sites if _SITE_TOKEN_RE.match(s)]
+        prefixes = sorted({
+            m.group(1) for s in site_tokens
+            if (m := re.match(r"^([A-Z]{2,4})", s))
+        })
+        prefixes = [p for p in prefixes if _SITE_PREFIX_RE.match(p)]
+        if not prefixes:
+            return []
+        clauses = [f"Scrum_Team_Name__c LIKE 'DCENG-{p}%'" for p in prefixes]
+        clauses += [f"Subject__c LIKE '{tok}%'" for tok in site_tokens]
+        scope = " OR ".join(clauses)
+        soql = (
+            "SELECT Name, Subject__c, Status__c, Type__c, "
+            "Scrum_Team_Name__c, Priority__c, LastModifiedDate, "
+            "Assignee__r.Name, Case__c, Case__r.CaseNumber, Id "
+            "FROM ADM_Work__c "
+            f"WHERE Closed__c = 0 AND ({scope}) "
+            f"ORDER BY LastModifiedDate DESC LIMIT {int(limit)}"
+        )
+        try:
+            records = self._sf.query_all(soql).get("records", [])
+        except SalesforceExpiredSession:
+            raise
+        except Exception:
+            logger.exception("work-items query failed")
+            return []
+        out: list[WorkItem] = []
+        for r in records:
+            assignee = (r.get("Assignee__r") or {}).get("Name") or ""
+            case_lookup = r.get("Case__r") or {}
+            raw_modified = r.get("LastModifiedDate") or ""
+            out.append(WorkItem(
+                id=r["Id"],
+                name=r.get("Name") or r["Id"],
+                subject=r.get("Subject__c") or "",
+                status=r.get("Status__c") or "",
+                type=r.get("Type__c") or "",
+                team=r.get("Scrum_Team_Name__c") or "",
+                assignee=assignee,
+                priority=r.get("Priority__c") or "",
+                lastModified=_parse_iso(raw_modified) if raw_modified else None,
+                caseNumber=case_lookup.get("CaseNumber") or "",
+                caseId=r.get("Case__c") or "",
+            ))
+        return out
+
+    def get_work_item_detail(self, identifier: str) -> Optional[WorkItemDetail]:
+        """Return the full detail for one work item, looked up by its
+        human work id ("W-23124643") or its Salesforce 18-char id.
+
+        The identifier is allow-listed against ``_WORK_ID_RE`` /
+        ``_SF_ID_RE`` before it touches SOQL — the regex is the only
+        injection defence (SOQL has no parameter binding). Returns None
+        when nothing matches. Not region-scoped: a work item the user
+        clicked in the (already region-scoped) list is, by definition,
+        theirs to open; re-scoping here would only add a failure mode.
+        """
+        if self._sf is None:
+            return None
+        ident = (identifier or "").strip()
+        if _WORK_ID_RE.match(ident):
+            field, safe = "Name", ident
+        elif _SF_ID_RE.match(ident):
+            field, safe = "Id", ident
+        else:
+            return None
+        soql = (
+            "SELECT Id, Name, Subject__c, Status__c, Story_Status__c, "
+            "Type__c, Priority__c, Scrum_Team_Name__c, Assignee__r.Name, "
+            "Product_Owner__r.Name, QA_Engineer__r.Name, Story_Points__c, "
+            "Age__c, Days_In_Progress__c, Sprint_Name__c, Epic_Name__c, "
+            "Product_Tag_Name__c, Due_Date__c, CreatedDate, "
+            "LastModifiedDate, Case__c, Case__r.CaseNumber, Details__c "
+            f"FROM ADM_Work__c WHERE {field} = '{safe}' LIMIT 1"
+        )
+        try:
+            records = self._sf.query(soql).get("records", [])
+        except SalesforceExpiredSession:
+            raise
+        except Exception:
+            logger.exception("work-item detail query failed")
+            return None
+        if not records:
+            return None
+        r = records[0]
+
+        def _dt(raw: Optional[str]) -> Optional[datetime]:
+            return _parse_iso(raw) if raw else None
+
+        case_lookup = r.get("Case__r") or {}
+        details_plain, details_blocks = _parse_details(r.get("Details__c") or "")
+        return WorkItemDetail(
+            id=r["Id"],
+            name=r.get("Name") or r["Id"],
+            subject=r.get("Subject__c") or "",
+            status=r.get("Status__c") or "",
+            storyStatus=r.get("Story_Status__c") or "",
+            type=r.get("Type__c") or "",
+            priority=r.get("Priority__c") or "",
+            team=r.get("Scrum_Team_Name__c") or "",
+            assignee=(r.get("Assignee__r") or {}).get("Name") or "",
+            productOwner=(r.get("Product_Owner__r") or {}).get("Name") or "",
+            qaEngineer=(r.get("QA_Engineer__r") or {}).get("Name") or "",
+            storyPoints=r.get("Story_Points__c"),
+            ageDays=r.get("Age__c"),
+            daysInProgress=r.get("Days_In_Progress__c"),
+            sprint=r.get("Sprint_Name__c") or "",
+            epic=r.get("Epic_Name__c") or "",
+            productTag=r.get("Product_Tag_Name__c") or "",
+            theme=self._get_work_item_theme(r["Id"]),
+            dueDate=_dt(r.get("Due_Date__c")),
+            createdDate=_dt(r.get("CreatedDate")),
+            lastModified=_dt(r.get("LastModifiedDate")),
+            details=details_plain,
+            detailsBlocks=[_details_block(b) for b in details_blocks],
+            caseNumber=case_lookup.get("CaseNumber") or "",
+            caseId=r.get("Case__c") or "",
+            history=self._get_work_item_history(r["Id"]),
+        )
+
+    # Tracked fields we surface in the status-verlauf timeline, mapped to
+    # human labels. ADM_Work__History stores the API name in ``Field``.
+    # We deliberately ignore the dozens of internal/rollup fields that also
+    # get tracked (Column__c, ranks, sprint-ids, …) — only the ones a human
+    # cares about for "how did this story move".
+    _HISTORY_FIELDS = {
+        "Status__c": "Status",
+        "Assignee__c": "Assignee",
+        "QA_Engineer__c": "QA Engineer",
+        "Product_Owner__c": "Product Owner",
+        "Story_Points__c": "Story Points",
+        "Priority__c": "Priority",
+        "Type__c": "Type",
+    }
+
+    def _get_work_item_history(self, work_id: str) -> list[WorkItemHistoryEvent]:
+        """Newest-first tracked-field changes for one work item.
+
+        ``work_id`` is the SF 18-char id of an ADM_Work__c we just
+        resolved from the (already region-scoped) detail query, so it's
+        re-validated against ``_SF_ID_RE`` purely as injection defence
+        before it touches the SOQL f-string.
+
+        Salesforce records reference-field changes twice — one row with
+        the raw 15/18-char ids, one with the resolved display names. We
+        keep the human-readable row and drop the id-only one so the
+        timeline shows "Bhavesh Mistry → Najih El Amin", not the ids.
+        """
+        if self._sf is None or not _SF_ID_RE.match(work_id):
+            return []
+        fields_in = ", ".join(f"'{f}'" for f in self._HISTORY_FIELDS)
+        soql = (
+            "SELECT Field, OldValue, NewValue, CreatedBy.Name, CreatedDate "
+            f"FROM ADM_Work__History WHERE ParentId = '{work_id}' "
+            f"AND Field IN ({fields_in}) "
+            "ORDER BY CreatedDate DESC LIMIT 60"
+        )
+        try:
+            records = self._sf.query_all(soql).get("records", [])
+        except SalesforceExpiredSession:
+            raise
+        except Exception:
+            logger.exception("work-item history query failed")
+            return []
+        out: list[WorkItemHistoryEvent] = []
+        for r in records:
+            old = "" if r.get("OldValue") is None else str(r["OldValue"])
+            new = "" if r.get("NewValue") is None else str(r["NewValue"])
+            # Drop the id-only twin of a reference-field change.
+            if _SF_ID_RE.match(old) or _SF_ID_RE.match(new):
+                continue
+            raw_at = r.get("CreatedDate") or ""
+            out.append(WorkItemHistoryEvent(
+                field=self._HISTORY_FIELDS.get(r.get("Field"), r.get("Field") or ""),
+                oldValue=old,
+                newValue=new,
+                by=(r.get("CreatedBy") or {}).get("Name") or "",
+                at=_parse_iso(raw_at) if raw_at else None,
+            ))
+        return out
+
+    def _get_work_item_theme(self, work_id: str) -> str:
+        """Comma-joined theme name(s) for one work item.
+
+        Themes live on the junction object ``ADM_Theme_Assignment__c``,
+        not the deprecated ``Theme__c`` field. ``work_id`` is re-validated
+        against ``_SF_ID_RE`` before it touches SOQL. Rare for FRA items
+        (most carry none) so an empty string is the common, expected
+        result; the UI hides the field when it's blank.
+        """
+        if self._sf is None or not _SF_ID_RE.match(work_id):
+            return ""
+        soql = (
+            "SELECT Theme__r.Name FROM ADM_Theme_Assignment__c "
+            f"WHERE Work__c = '{work_id}' LIMIT 10"
+        )
+        try:
+            records = self._sf.query_all(soql).get("records", [])
+        except SalesforceExpiredSession:
+            raise
+        except Exception:
+            logger.exception("work-item theme query failed")
+            return ""
+        names = [
+            (rec.get("Theme__r") or {}).get("Name") or "" for rec in records
+        ]
+        return ", ".join(n for n in names if n)
+
+    def get_work_item_feed(self, work_id: str, limit: int = 50) -> list[dict]:
+        """Chatter feed (posts + threaded comments + tracked changes) for
+        one work item, newest-first.
+
+        ``ADM_Work__Feed`` — unlike ``FeedItem`` — accepts a direct
+        ``ParentId`` filter, so the whole feed comes back in one query.
+        ``work_id`` is re-validated against ``_SF_ID_RE`` before it touches
+        SOQL. Post / comment bodies are parsed into the same structured
+        rich-text blocks as the Details field (paragraphs, links, bold,
+        and whitelisted ``sfdc://069…`` images) rather than passing HTML
+        to the browser. ``CreatedBy`` on the feed + comments is polymorphic
+        (User|Group|…), so author photos are resolved in a follow-up User
+        query and served through the avatar proxy — putting SmallPhotoUrl
+        in the subselect would make SF reject the whole query.
+        """
+        if self._sf is None or not _SF_ID_RE.match(work_id):
+            return []
+        out: list[dict] = []
+        me_id = self._current_user_id()
+        creator_user_ids: set[str] = set()
+
+        def _blocks(raw: str) -> list[dict]:
+            _, blocks = _parse_details(raw or "")
+            return [_details_block(b).model_dump() for b in blocks]
+
+        try:
+            soql = (
+                "SELECT Id, Type, Body, CreatedDate, "
+                "CreatedById, CreatedBy.Name, CreatedBy.Type, "
+                "(SELECT Id, OldValue, NewValue, FieldName "
+                " FROM FeedTrackedChanges), "
+                "(SELECT Id, CommentBody, CreatedDate, "
+                " CreatedById, CreatedBy.Name, CreatedBy.Type "
+                " FROM FeedComments ORDER BY CreatedDate ASC LIMIT 50) "
+                f"FROM ADM_Work__Feed WHERE ParentId = '{work_id}' "
+                "ORDER BY CreatedDate DESC LIMIT 50"
+            )
+            feeds = self._sf.query(soql).get("records", [])
+        except SalesforceExpiredSession:
+            raise
+        except SalesforceError:
+            logger.exception("get_work_item_feed: feed query failed")
+            return []
+
+        for f in feeds:
+            feed_type = f.get("Type")
+            creator = f.get("CreatedBy") or {}
+            creator_id = f.get("CreatedById") or ""
+            if creator.get("Type") == "User" and creator_id:
+                creator_user_ids.add(creator_id)
+            if feed_type in ("TextPost", "ContentPost"):
+                out.append({
+                    "id": f["Id"],
+                    "kind": "post",
+                    "author": creator.get("Name") or "",
+                    "authorPhotoUrl": "",
+                    "_creatorId": creator_id,
+                    "isMine": bool(me_id and creator_id == me_id),
+                    "at": f["CreatedDate"],
+                    "blocks": _blocks(f.get("Body")),
+                })
+            elif feed_type == "TrackedChange":
+                changes = (
+                    (f.get("FeedTrackedChanges") or {}).get("records") or []
+                )
+                for ch in changes:
+                    field_api = (ch.get("FieldName") or "").split(".", 1)[-1]
+                    old = "" if ch.get("OldValue") is None else str(ch["OldValue"])
+                    new = "" if ch.get("NewValue") is None else str(ch["NewValue"])
+                    # Drop the id-only twin SF emits for reference-field
+                    # changes (keep the human-readable row), same as history.
+                    if _SF_ID_RE.match(old) or _SF_ID_RE.match(new):
+                        continue
+                    out.append({
+                        "id": f"{f['Id']}:{ch['Id']}",
+                        "kind": "trackedChange",
+                        "author": creator.get("Name") or "",
+                        "authorPhotoUrl": "",
+                        "_creatorId": creator_id,
+                        "isMine": bool(me_id and creator_id == me_id),
+                        "at": f["CreatedDate"],
+                        "blocks": [],
+                        "fieldLabel": self._HISTORY_FIELDS.get(field_api, field_api),
+                        "fromValue": old,
+                        "toValue": new,
+                    })
+            for cm in (f.get("FeedComments") or {}).get("records") or []:
+                cb = cm.get("CreatedBy") or {}
+                cm_creator = cm.get("CreatedById") or ""
+                if cb.get("Type") == "User" and cm_creator:
+                    creator_user_ids.add(cm_creator)
+                out.append({
+                    "id": cm["Id"],
+                    "kind": "comment",
+                    "parentId": f["Id"],
+                    "author": cb.get("Name") or "",
+                    "authorPhotoUrl": "",
+                    "_creatorId": cm_creator,
+                    "isMine": bool(me_id and cm_creator == me_id),
+                    "at": cm["CreatedDate"],
+                    "blocks": _blocks(cm.get("CommentBody")),
+                })
+
+        # Resolve author photos in one follow-up query (polymorphic
+        # CreatedBy ⇒ SmallPhotoUrl can't live in the subselect) and route
+        # them through the avatar proxy.
+        if creator_user_ids:
+            try:
+                ids_clause = _safe_ids_clause(list(creator_user_ids))
+                if ids_clause:
+                    user_rows = self._sf.query(
+                        f"SELECT Id, SmallPhotoUrl FROM User "
+                        f"WHERE Id IN ({ids_clause})"
+                    )["records"]
+                    by_id = {u["Id"]: u for u in user_rows}
+                    for e in out:
+                        uid = e.pop("_creatorId", None)
+                        if uid and by_id.get(uid, {}).get("SmallPhotoUrl"):
+                            e["authorPhotoUrl"] = f"/api/avatar/{uid}"
+            except SalesforceError:
+                logger.exception("get_work_item_feed: user-photo query failed")
+        for e in out:
+            e.pop("_creatorId", None)
+
+        out.sort(key=lambda e: e.get("at") or "", reverse=True)
+        return out[:limit]
 
     # Short TTL for the case-id list backing CaseHistory queries (RTS
     # today, activity log). Long enough to absorb the polling cadence

@@ -22,14 +22,17 @@ interface TabPillProps {
 function TabPill({ sheet, onRestore, onClose }: TabPillProps) {
   const { t } = useLanguage();
   const accent = sheet.statusColor ?? "var(--text-muted)";
+  const isWorkItem = sheet.kind === "workitem";
   // Drop the city prefix to save space on the minimised pill, append
   // the asset's U-position so the engineer sees the rack slot at a
-  // glance (FRA3-14.1-124-E35-HU14).
-  const assetPath = formatAssetPath(
-    sheet.ticket.assetLocationPath,
-    sheet.ticket.assetName,
-    { includeSitePrefix: true },
-  );
+  // glance (FRA3-14.1-124-E35-HU14). Work items have no asset path.
+  const assetPath = isWorkItem
+    ? ""
+    : formatAssetPath(
+        sheet.ticket.assetLocationPath,
+        sheet.ticket.assetName,
+        { includeSitePrefix: true },
+      );
 
   return (
     <div
@@ -49,6 +52,14 @@ function TabPill({ sheet, onRestore, onClose }: TabPillProps) {
         />
         <span className="flex flex-col leading-tight gap-0.5">
           <span className="flex items-center gap-2">
+            {isWorkItem && (
+              <span
+                className="text-[10px] uppercase tracking-wide px-1 py-0.5 rounded font-semibold"
+                style={{ background: `${accent}22`, color: accent }}
+              >
+                WI
+              </span>
+            )}
             <span className="font-mono text-sm">{sheet.caseNumber}</span>
             {sheet.status && (
               <span className="opacity-60 text-sm hidden sm:inline">

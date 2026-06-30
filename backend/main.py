@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from datetime import datetime, timezone
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,7 @@ from .gus_client import (
 )
 from .models import (
     ActivityResponse, CaseDetailResponse, RmaActiveResponse, RmaDetailResponse,
+    WorkItemDetail, WorkItemsResponse,
 )
 
 app = FastAPI(title="WiDash API")
@@ -446,6 +448,173 @@ def get_activity(
     resp = ActivityResponse(events=merged[:limit])
     _cache.set(cache_key, resp, ttl_seconds=10)
     return resp
+
+
+@app.get("/api/work-items", response_model=WorkItemsResponse)
+def get_work_items(
+    limit: int = Query(default=200, ge=1, le=500),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    """Open GUS work items (ADM_Work__c) for the active report's
+    region(s) — the SF engineers' project-management tasks, surfaced
+    read-only so the whole team sees who is blocked on what.
+
+    Region scoping is derived from the active report inside the client
+    (no hardcoded site), so the same endpoint serves Frankfurt today
+    and any future region the moment its report is configured.
+    """
+    cache_key = f"workitems:{_report_ids_key(clients)}:{limit}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    items: list = []
+    for c in clients:
+        items.extend(c.get_work_items(limit=limit))
+    # Merge across regions: newest-modified first, then trim so the
+    # combined result behaves like one list regardless of how many
+    # reports are active.
+    items.sort(
+        key=lambda w: w.lastModified or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    sites: list[str] = []
+    for c in clients:
+        for s in c._report_site_codes():
+            if s not in sites:
+                sites.append(s)
+    resp = WorkItemsResponse(items=items[:limit], sites=sorted(sites))
+    # Work items change far less often than RMA statuses; a 60s TTL
+    # keeps the list fresh without re-querying ADM_Work__c on every
+    # dashboard poll.
+    _cache.set(cache_key, resp, ttl_seconds=60)
+    return resp
+
+
+# Work-item ids are "W-<digits>" — validate the path param before it
+# reaches SOQL (the client re-checks, but reject obvious junk early).
+_WORK_ITEM_ID_RE = re.compile(r"^(W-[0-9]{4,12}|[a-zA-Z0-9]{15,18})$")
+
+
+@app.get("/api/work-item/{identifier}", response_model=WorkItemDetail)
+def get_work_item_detail(
+    identifier: str,
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    """Full read-only detail for one GUS work item, by work id
+    ("W-23124643") or Salesforce id. Backs the work-item sheet tab.
+
+    Tries each active report's client in turn (they share the SF
+    session, so the first that resolves it wins). 404 when no client
+    can find it — same contract as the case lookup."""
+    if not _WORK_ITEM_ID_RE.match(identifier or ""):
+        return JSONResponse(status_code=400, content={"error": "bad_id"})
+    cache_key = f"workitem:{identifier}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    for client in clients:
+        detail = client.get_work_item_detail(identifier)
+        if detail is not None:
+            _cache.set(cache_key, detail, ttl_seconds=60)
+            return detail
+    return JSONResponse(
+        status_code=404,
+        content={"error": "not_found",
+                 "message": f"No work item matches {identifier!r}."},
+    )
+
+
+@app.get("/api/work-item/{work_id}/feed")
+def get_work_item_feed(
+    work_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    client: GusClient = Depends(get_gus_client),
+):
+    """Read-only Chatter feed (posts + comments + tracked changes) for one
+    work item. ``work_id`` is the ADM_Work__c SF id (the FE has it from the
+    detail response). Posts open sheets poll this, so the cache is short."""
+    if (err := _require_sf_id(work_id)) is not None:
+        return err
+    cache_key = f"workitem_feed:{work_id}:{limit}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    entries = client.get_work_item_feed(work_id, limit=limit)
+    resp = {"workId": work_id, "entries": entries}
+    _cache.set(cache_key, resp, ttl_seconds=10)
+    return resp
+
+
+# Embedded chatter images are Salesforce ContentDocuments (069…). Cache the
+# fetched bytes briefly so a sheet re-render / poll doesn't re-download.
+_wi_image_cache: dict[str, tuple[float, bytes, str]] = {}
+_WI_IMAGE_TTL = 600.0  # seconds
+_CONTENT_DOC_RE = re.compile(r"^069[A-Za-z0-9]{12,15}$")
+# ContentVersion ids start 068; validate the one SF hands us before we
+# interpolate it into the download URL.
+_CONTENT_VER_RE = re.compile(r"^068[A-Za-z0-9]{12,15}$")
+_IMAGE_CTYPE_BY_FILETYPE = {
+    "PNG": "image/png", "JPG": "image/jpeg", "JPEG": "image/jpeg",
+    "GIF": "image/gif", "WEBP": "image/webp", "BMP": "image/bmp",
+    "SVG": "image/svg+xml",
+}
+
+
+@app.get("/api/work-item-image/{content_id}")
+def get_work_item_image(
+    content_id: str,
+    client: GusClient = Depends(get_gus_client),
+):
+    """Proxy a Salesforce ContentDocument image (chatter inline image)
+    through our sf-CLI session.
+
+    Like the avatar proxy: the browser has no SF session cookie, so a
+    direct <img src> to the file 401s. ``content_id`` is allow-listed
+    against the 069… ContentDocument shape before it touches SOQL — the
+    same id the parser whitelisted from ``sfdc://069…``. We resolve the
+    latest version, download VersionData with the session token, and label
+    the bytes with an image content-type derived from the file's FileType
+    (never the upstream octet-stream, which the browser won't render as an
+    image)."""
+    if not _CONTENT_DOC_RE.match(content_id or ""):
+        return JSONResponse(status_code=400, content={"error": "bad_id"})
+    cached = _wi_image_cache.get(content_id)
+    now = time.time()
+    if cached and now - cached[0] < _WI_IMAGE_TTL:
+        return Response(content=cached[1], media_type=cached[2])
+    sf = client._sf
+    if sf is None:
+        return JSONResponse(status_code=503, content={"error": "no_sf_session"})
+    try:
+        rows = sf.query(
+            "SELECT LatestPublishedVersionId, FileType, ContentSize "
+            f"FROM ContentDocument WHERE Id = '{content_id}' LIMIT 1"
+        )["records"]
+    except SalesforceError:
+        return JSONResponse(status_code=502, content={"error": "salesforce_error"})
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    file_type = (rows[0].get("FileType") or "").upper()
+    ctype = _IMAGE_CTYPE_BY_FILETYPE.get(file_type)
+    if ctype is None:
+        # Only ever serve known image types — never a downloadable blob.
+        return JSONResponse(status_code=415, content={"error": "not_an_image"})
+    version_id = rows[0].get("LatestPublishedVersionId") or ""
+    if not _CONTENT_VER_RE.match(version_id):
+        return JSONResponse(status_code=404, content={"error": "no_version"})
+    try:
+        r = requests.get(
+            f"{sf.base_url}sobjects/ContentVersion/{version_id}/VersionData",
+            headers={"Authorization": f"Bearer {sf.session_id}"},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return JSONResponse(status_code=502, content={"error": "fetch_failed"})
+    if r.status_code != 200:
+        return JSONResponse(status_code=r.status_code,
+                            content={"error": "upstream_error"})
+    _wi_image_cache[content_id] = (now, r.content, ctype)
+    return Response(content=r.content, media_type=ctype)
 
 
 @app.post("/api/refresh")
@@ -1234,6 +1403,136 @@ def patch_case_comment(
     return {"status": "ok"}
 
 
+# Allow-listed lookup kinds for /api/lookup/case_by_identifier.
+# Each kind binds a strict regex for the user-supplied value, plus the
+# Tech_Asset__c field(s) we'll match it against. SOQL has no parameter
+# binding, so the regex IS the injection defence — never relax it.
+_LOOKUP_KINDS: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
+    # Fully-qualified host or short name. Allows letters, digits,
+    # hyphens, dots; no spaces, quotes, percent signs, etc.
+    "hostname": (
+        re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{1,79}$"),
+        ("Device_Name__c", "Discovered_Host_Name__c"),
+    ),
+    # Serial / asset tag. Salesforce serials are 4-32 alphanumeric +
+    # optional dash; tighter than hostname so we don't accidentally
+    # match a hostname-shaped string.
+    "serial": (
+        re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{3,31}$"),
+        ("Tech_Ops_Serial_Number__c",),
+    ),
+    # Bare GUS case number (the 8-digit value engineers cite, NOT the
+    # Salesforce 15-char id). Handled separately because it queries
+    # Case directly instead of going via Tech_Asset__c.
+    "case_number": (
+        re.compile(r"^[0-9]{6,12}$"),
+        ("CaseNumber",),
+    ),
+}
+
+
+# NOTE: this specific route MUST stay registered before the
+# ``/api/lookup/{sobject}`` wildcard below — FastAPI matches routes in
+# registration order, so the wildcard would otherwise swallow
+# ``case_by_identifier`` as a {sobject} value and reject it with
+# ``bad_sobject``.
+@app.get("/api/lookup/case_by_identifier")
+def lookup_case_by_identifier(
+    kind: str = Query(..., max_length=20),
+    value: str = Query(..., max_length=120),
+    clients: list[GusClient] = Depends(get_gus_clients),
+):
+    """Find an open RMA case in the active report(s) by hostname or
+    serial number. Used by the chat sidebar to make Claude-cited
+    identifiers clickable.
+
+    Allow-listed kinds (hostname / serial) with strict per-kind regex
+    on ``value``. Search is scoped to the case ids in the active
+    report — we never broaden to all of Salesforce — so a hit means
+    "this engineer can open it in WiDash right now".
+    """
+    spec = _LOOKUP_KINDS.get(kind)
+    if spec is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_kind",
+                     "message": f"kind must be one of {list(_LOOKUP_KINDS)}"},
+        )
+    value_re, fields = spec
+    v = (value or "").strip()
+    if not value_re.match(v):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "bad_value", "message": "value failed validation"},
+        )
+
+    safe_v = v.replace("\\", "\\\\").replace("'", "\\'")
+
+    for client in clients:
+        sf = client._sf
+        if sf is None:
+            continue
+        try:
+            if kind == "case_number":
+                # Direct case lookup. We deliberately don't scope to the
+                # active report's case ids — the chat may cite a case
+                # that recently rolled out of the 14-day window. The
+                # CaseNumber regex guarantees the input is safe.
+                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
+                case_rows = sf.query(
+                    f"SELECT Id, CaseNumber, Status, Subject, "
+                    f"SM_Data_Center_Facility__c FROM Case "
+                    f"WHERE ({field_clauses}) "
+                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
+                ).get("records", [])
+            else:
+                # Hostname / serial: resolve via Tech_Asset__c, then
+                # filter to the active report's cases so we only ever
+                # return a case the engineer can open in the UI.
+                try:
+                    ticket_ids = client._query_active_case_ids()
+                except SalesforceError:
+                    logger.exception("active case ids fetch failed in lookup")
+                    continue
+                if not ticket_ids:
+                    continue
+                ids_clause = ",".join(f"'{tid}'" for tid in ticket_ids)
+                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
+                asset_rows = sf.query(
+                    f"SELECT Id FROM Tech_Asset__c "
+                    f"WHERE ({field_clauses}) LIMIT 5"
+                ).get("records", [])
+                if not asset_rows:
+                    continue
+                asset_ids_clause = ",".join(f"'{r['Id']}'" for r in asset_rows)
+                case_rows = sf.query(
+                    f"SELECT Id, CaseNumber, Status, Subject, "
+                    f"SM_Data_Center_Facility__c FROM Case "
+                    f"WHERE Id IN ({ids_clause}) "
+                    f"AND FK_Tech_Asset__c IN ({asset_ids_clause}) "
+                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
+                ).get("records", [])
+        except SalesforceError:
+            logger.exception("Case lookup failed (kind=%s)", kind)
+            continue
+        if case_rows:
+            row = case_rows[0]
+            return {
+                "caseSfId": row["Id"],
+                "caseNumber": row.get("CaseNumber") or "",
+                "status": row.get("Status") or "",
+                "subject": row.get("Subject") or "",
+                "location": row.get("SM_Data_Center_Facility__c") or "",
+                "reportId": client._report_id,
+            }
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": "not_found",
+                 "message": f"No active case matches {kind}={v!r}."},
+    )
+
+
 @app.get("/api/lookup/{sobject}")
 def lookup_search(
     sobject: str,
@@ -1323,127 +1622,6 @@ def lookup_search(
             for r in rows
         ],
     }
-
-
-# Allow-listed lookup kinds for /api/lookup/case_by_identifier.
-# Each kind binds a strict regex for the user-supplied value, plus the
-# Tech_Asset__c field(s) we'll match it against. SOQL has no parameter
-# binding, so the regex IS the injection defence — never relax it.
-_LOOKUP_KINDS: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
-    # Fully-qualified host or short name. Allows letters, digits,
-    # hyphens, dots; no spaces, quotes, percent signs, etc.
-    "hostname": (
-        re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{1,79}$"),
-        ("Device_Name__c", "Discovered_Host_Name__c"),
-    ),
-    # Serial / asset tag. Salesforce serials are 4-32 alphanumeric +
-    # optional dash; tighter than hostname so we don't accidentally
-    # match a hostname-shaped string.
-    "serial": (
-        re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{3,31}$"),
-        ("Tech_Ops_Serial_Number__c",),
-    ),
-    # Bare GUS case number (the 8-digit value engineers cite, NOT the
-    # Salesforce 15-char id). Handled separately because it queries
-    # Case directly instead of going via Tech_Asset__c.
-    "case_number": (
-        re.compile(r"^[0-9]{6,12}$"),
-        ("CaseNumber",),
-    ),
-}
-
-
-@app.get("/api/lookup/case_by_identifier")
-def lookup_case_by_identifier(
-    kind: str = Query(..., max_length=20),
-    value: str = Query(..., max_length=120),
-    clients: list[GusClient] = Depends(get_gus_clients),
-):
-    """Find an open RMA case in the active report(s) by hostname or
-    serial number. Used by the chat sidebar to make Claude-cited
-    identifiers clickable.
-
-    Allow-listed kinds (hostname / serial) with strict per-kind regex
-    on ``value``. Search is scoped to the case ids in the active
-    report — we never broaden to all of Salesforce — so a hit means
-    "this engineer can open it in WiDash right now".
-    """
-    spec = _LOOKUP_KINDS.get(kind)
-    if spec is None:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "bad_kind",
-                     "message": f"kind must be one of {list(_LOOKUP_KINDS)}"},
-        )
-    value_re, fields = spec
-    v = (value or "").strip()
-    if not value_re.match(v):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "bad_value", "message": "value failed validation"},
-        )
-
-    safe_v = v.replace("\\", "\\\\").replace("'", "\\'")
-
-    for client in clients:
-        sf = client._sf
-        if sf is None:
-            continue
-        try:
-            if kind == "case_number":
-                # Direct case lookup. We deliberately don't scope to the
-                # active report's case ids — the chat may cite a case
-                # that recently rolled out of the 14-day window. The
-                # CaseNumber regex guarantees the input is safe.
-                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
-                case_rows = sf.query(
-                    f"SELECT Id, CaseNumber, Status FROM Case "
-                    f"WHERE ({field_clauses}) "
-                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
-                ).get("records", [])
-            else:
-                # Hostname / serial: resolve via Tech_Asset__c, then
-                # filter to the active report's cases so we only ever
-                # return a case the engineer can open in the UI.
-                try:
-                    ticket_ids = client._query_active_case_ids()
-                except SalesforceError:
-                    logger.exception("active case ids fetch failed in lookup")
-                    continue
-                if not ticket_ids:
-                    continue
-                ids_clause = ",".join(f"'{tid}'" for tid in ticket_ids)
-                field_clauses = " OR ".join(f"{f} = '{safe_v}'" for f in fields)
-                asset_rows = sf.query(
-                    f"SELECT Id FROM Tech_Asset__c "
-                    f"WHERE ({field_clauses}) LIMIT 5"
-                ).get("records", [])
-                if not asset_rows:
-                    continue
-                asset_ids_clause = ",".join(f"'{r['Id']}'" for r in asset_rows)
-                case_rows = sf.query(
-                    f"SELECT Id, CaseNumber, Status FROM Case "
-                    f"WHERE Id IN ({ids_clause}) "
-                    f"AND FK_Tech_Asset__c IN ({asset_ids_clause}) "
-                    f"ORDER BY LastModifiedDate DESC LIMIT 1"
-                ).get("records", [])
-        except SalesforceError:
-            logger.exception("Case lookup failed (kind=%s)", kind)
-            continue
-        if case_rows:
-            row = case_rows[0]
-            return {
-                "caseSfId": row["Id"],
-                "caseNumber": row.get("CaseNumber") or "",
-                "status": row.get("Status") or "",
-                "reportId": client._report_id,
-            }
-
-    return JSONResponse(
-        status_code=404,
-        content={"error": "not_found",
-                 "message": f"No active case matches {kind}={v!r}."},
-    )
 
 
 _avatar_cache: dict[str, tuple[float, bytes, str]] = {}

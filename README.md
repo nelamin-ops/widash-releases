@@ -3,9 +3,11 @@
 A local RMA dashboard for datacenter engineers. Reads cases from a
 GUS report, talks to Coolan for component health, walks the
 master-patchplan to surface cable connections, joins mom.dmz topology
-with Argus time-series for live rack temperatures, and lets you read +
-write Salesforce cases, chatter, and case fields without leaving the
-tab.
+with Argus time-series for live rack temperatures, surfaces the
+region's open GUS work items (ADM_Work__c) alongside the RMAs, and
+lets you read + write Salesforce cases, chatter, and case fields
+without leaving the tab. A search box up top opens any case by
+number / hostname / serial.
 
 Frankfurt is the only region pre-registered today; the multi-region
 plumbing is in place so adding Paris / Amsterdam / Tokyo / … is one
@@ -122,6 +124,61 @@ cd frontend && bun run test                              # frontend
   dashboard when a newer release is on `widash-releases`. Shows
   current + latest version + a Release Notes link. Run
   `./update.sh` to take the new version.
+
+### Case search
+Collapsible section directly under the header. Type a **case number**,
+**hostname**, or **serial** and the backend resolves it to a single
+case (case numbers are unique); the hit renders as a one-row list
+(case · status · location · subject) like a donut-segment list, and
+clicking the case number opens it in a tab. Ambiguous text tries
+hostname then serial (or vice-versa) so you needn't know which GUS
+field holds the value. Backed by `/api/lookup/case_by_identifier`
+(the same allow-listed lookup the chat sidebar uses).
+
+### Work items
+Collapsible section directly under the donut overview, listing the
+**open GUS work items** (`ADM_Work__c`) for the active region —
+the SF engineers' project-management tasks, surfaced read-only so the
+whole team sees who's working on (or blocked by) what. Region scoping
+is derived from the active report (no hardcoded site): a work item
+counts as in-region when its scrum team is `DCENG-<site>` *or* its
+subject starts with a site code (so cross-team work like the
+compliance team's media-destruction stories still shows). Same
+`DCENG-<SITE>` naming holds worldwide, so CDG / LHR / … light up
+automatically once their report is active. Free-text filter over
+id / subject / team / assignee / status.
+
+Clicking a work id opens a **work-item sheet** in the same tab stack
+as the case sheets — resizable, minimisable, sharing the preferred
+height. It's the work-item analogue of the case sheet but with the
+agile field set instead of asset / Coolan / patchplan, laid out in two
+columns:
+
+- **Left** — the field grid (subject, status, type, priority, story
+  status, story points, team, assignee, product owner, QA engineer,
+  sprint, epic, product tag, theme, age, days-in-progress, due /
+  created dates), the **Details** field, and a **status-history**
+  timeline. Theme comes from the `ADM_Theme_Assignment__c` junction
+  (the bare `Theme__c` field is deprecated). Details is rich text:
+  GUS work items routinely embed asset *tables* (40+ rows), headings,
+  lists, bold and links here, so the backend parses the HTML into a
+  structured block model (paragraphs / headings / lists / tables of
+  inline segments) the sheet renders as real React nodes — it never
+  injects backend HTML.
+- **Right** — the work item's **Chatter feed** (`ADM_Work__Feed`),
+  read-only: top-level posts newest-first, comments threaded one level
+  under their parent, tracked-field changes as pills, each with the
+  author's avatar. Post / comment bodies use the same rich-text parser
+  as Details, so embedded **images** show inline — they're proxied
+  through `/api/work-item-image/{id}`, which only ever serves a
+  whitelisted `069…` ContentDocument as a known image type. (Writing
+  to the feed is intentionally not built — that's a future
+  writes-pill-gated surface.)
+
+Minimised work-item tabs carry a small **WI** badge so they don't get
+confused with case tabs. "Open in GUS" stays available in the sheet
+header. Backed by `/api/work-items` (list), `/api/work-item/{id}`
+(detail), and `/api/work-item/{sf-id}/feed` (feed).
 
 ### Case sheet
 Bottom sheet that opens when you click a ticket. Up to one open at a
@@ -353,6 +410,7 @@ a case's recent comments without leaving the dashboard.
 │  localhost:5173 │     │  localhost:8000                │
 └─────────────────┘     │                                │
                         │  GusClient ─► Salesforce       │
+                        │    (RMA cases + ADM_Work__c)   │
                         │  CoolanClient ─► Coolan        │
                         │  PatchplanSource ─► CSVs       │
                         │  MomClient ─► mom.dmz / Argus  │
@@ -383,7 +441,9 @@ A condensed pointer list — read the files for the full picture.
 **Backend (`backend/`):**
 - `main.py` — FastAPI app, every REST endpoint.
 - `gus_client.py` — SF report parsing, `SITE_REPORTS`, status
-  colours, activity log SOQL.
+  colours, activity log SOQL, work-item (`ADM_Work__c`) list + detail
+  + feed (`ADM_Work__Feed`) + history, and the rich-text Details
+  parser (`_parse_details`, shared by Details + feed bodies).
 - `case_detail.py` — Per-case detail builder (Case + Tech_Asset,
   picklists, lookups). Where new SF write paths go.
 - `coolan_client.py` — Coolan GraphQL (machines, components,
@@ -400,7 +460,8 @@ A condensed pointer list — read the files for the full picture.
 - `api.ts` — All HTTP calls. **Always use `apiFetch` for `/api/...`**
   so `X-Report-Id` is attached.
 - `components/` — Each major UI block lives in its own file
-  (Header, ActivityLog, CaseDetailSheet, ChatSidebar, …).
+  (Header, ActivityLog, CaseDetailSheet, ChatSidebar,
+  CaseSearchSection, WorkItemsSection, WorkItemSheet, …).
 - `hooks/` — Reusable state + behaviour (useWriteMode, useLanguage,
   usePolling, useTooltips, …).
 - `statusColors.ts` — Colour map for non-active statuses. **Must

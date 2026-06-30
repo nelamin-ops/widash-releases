@@ -72,6 +72,104 @@ export interface RmaDetailResponse {
   tickets: RmaTicket[];
 }
 
+export interface WorkItem {
+  id: string;
+  name: string;
+  subject: string;
+  status: string;
+  type: string;
+  team: string;
+  assignee: string;
+  priority: string;
+  lastModified?: string | null;
+  /** Bare case number linked via ADM_Work__c.Case__c — empty for most
+   *  FRA items today (they reference the case in the subject text only). */
+  caseNumber: string;
+  caseId: string;
+  gusUrl: string;
+}
+
+export interface WorkItemsResponse {
+  items: WorkItem[];
+  /** Site codes the active report covers — used to label the section. */
+  sites: string[];
+  fetchedAt: string;
+}
+
+export interface WorkItemHistoryEvent {
+  field: string;
+  oldValue: string;
+  newValue: string;
+  by: string;
+  at?: string | null;
+}
+
+export interface DetailsSegment {
+  text: string;
+  href: string;
+  bold: boolean;
+  /** Whitelisted Salesforce ContentDocument id (069…) for an embedded
+   *  image; loaded via the backend image proxy. Empty for non-images. */
+  imageId: string;
+}
+
+export interface DetailsBlock {
+  kind: "p" | "h" | "ul" | "ol" | "table";
+  segments: DetailsSegment[];
+  items: DetailsSegment[][];
+  rows: DetailsSegment[][][];
+}
+
+export interface WorkItemFeedEntry {
+  id: string;
+  kind: "post" | "comment" | "trackedChange";
+  parentId?: string;
+  author: string;
+  authorPhotoUrl?: string;
+  isMine: boolean;
+  at: string;
+  /** Rich-text body parsed into structured blocks (empty for trackedChange). */
+  blocks: DetailsBlock[];
+  fieldLabel?: string;
+  fromValue?: string;
+  toValue?: string;
+}
+
+export interface WorkItemFeedResponse {
+  workId: string;
+  entries: WorkItemFeedEntry[];
+}
+
+export interface WorkItemDetail {
+  id: string;
+  name: string;
+  subject: string;
+  status: string;
+  storyStatus: string;
+  type: string;
+  priority: string;
+  team: string;
+  assignee: string;
+  productOwner: string;
+  qaEngineer: string;
+  storyPoints?: number | null;
+  ageDays?: number | null;
+  daysInProgress?: number | null;
+  sprint: string;
+  epic: string;
+  productTag: string;
+  theme: string;
+  dueDate?: string | null;
+  createdDate?: string | null;
+  lastModified?: string | null;
+  details: string;
+  detailsBlocks: DetailsBlock[];
+  caseNumber: string;
+  caseId: string;
+  history: WorkItemHistoryEvent[];
+  gusUrl: string;
+}
+
 export interface ActivityEvent {
   id: string;
   ticketId: string;

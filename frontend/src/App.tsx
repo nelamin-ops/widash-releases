@@ -14,6 +14,12 @@ import { RegionSettingsModal } from "./components/RegionSettingsModal";
 import { PatchplanExplorer } from "./components/PatchplanExplorer";
 import { TempsExplorer } from "./components/TempsExplorer";
 import { ChatSidebar } from "./components/ChatSidebar";
+import { CaseSearchSection } from "./components/CaseSearchSection";
+import { WorkItemsSection } from "./components/WorkItemsSection";
+import { WorkItemSheet } from "./components/WorkItemSheet";
+import { SheetErrorBoundary } from "./components/SheetErrorBoundary";
+import type { CaseLookupResult } from "./api";
+import type { WorkItem } from "./types";
 
 // CaseDetailSheet pulls in chatter, edit modal, lookup combobox, and
 // the Coolan components panel — all of which the dashboard doesn't
@@ -216,6 +222,53 @@ export default function App() {
     });
   }
 
+  /** Open a case sheet from a backend lookup hit (search box, chat).
+   *  Prefers an already-loaded ticket so the sheet gets full asset /
+   *  Coolan context; otherwise mounts via a stub — CaseDetailSheet
+   *  fetches its own detail by id, so id + name + status is enough,
+   *  and this path also surfaces closed / RTS cases that aren't in any
+   *  active bucket. */
+  function openCaseFromLookup(hit: CaseLookupResult) {
+    const inSelected = selectedTickets.find((tk) => tk.id === hit.caseSfId);
+    if (inSelected) { handleOpenTicket(inSelected); return; }
+    const stub: RmaTicket = {
+      id: hit.caseSfId,
+      name: hit.caseNumber,
+      status: hit.status,
+    } as RmaTicket;
+    const bucket = active?.buckets.find((b) => b.status === hit.status);
+    caseSheets.open(stub, {
+      status: hit.status,
+      statusColor: bucket?.color ?? colorForStatus(hit.status),
+    });
+  }
+
+  /** Open a work item in its own sheet tab (shares the case tab stack). */
+  function handleOpenWorkItem(wi: WorkItem) {
+    caseSheets.openWorkItem(
+      { id: wi.id, workId: wi.name, subject: wi.subject, status: wi.status },
+      { statusColor: undefined },
+    );
+  }
+
+  /** Open a case sheet by its bare case number ("91628797"). Tries the
+   *  cheapest already-loaded sources first, then the backend lookup so
+   *  cases outside the 14-day window / in closed buckets still open.
+   *  Shared by the chat sidebar and the work-item "linked case" button. */
+  async function openCaseByNumber(caseNumber: string) {
+    const inSelected = selectedTickets.find((tk) => tk.name === caseNumber);
+    if (inSelected) { handleOpenTicket(inSelected); return; }
+    const ev = events.find((e) => e.ticketId === caseNumber);
+    if (ev) {
+      handleOpenFromActivity(ev.ticketSfId, ev.caseStatus);
+      if (active?.buckets.some((b) => b.status === ev.caseStatus)) return;
+    }
+    try {
+      const hit = await lookupCaseByIdentifier("case_number", caseNumber);
+      if (hit) openCaseFromLookup({ ...hit, caseNumber: hit.caseNumber || caseNumber });
+    } catch { /* ignore — user can retry */ }
+  }
+
   /** Activity-log row click: only opens a tab for cases still in an
    *  active bucket. The current detail-list (selectedTickets) is the
    *  cheapest hit; anything else triggers a one-shot fetchDetails so
@@ -319,6 +372,8 @@ export default function App() {
         </div>
       )}
 
+      <CaseSearchSection onOpenCase={openCaseFromLookup} />
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         {active ? (
           <>
@@ -340,6 +395,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      <WorkItemsSection onOpenWorkItem={handleOpenWorkItem} />
 
       <AnimatePresence>
         {selectedStatus && (
@@ -416,8 +473,28 @@ export default function App() {
         .filter((s) => !s.minimized)
         .slice(-1)
         .map((s) => (
-          <Suspense
+          // Per-sheet error boundary — a render crash in one case (e.g. a
+          // stub ticket missing a field the sheet assumes) shows a
+          // dismissible panel instead of white-screening the whole app.
+          <SheetErrorBoundary
             key={s.id}
+            onClose={() => caseSheets.close(s.id)}
+          >
+          {s.kind === "workitem" ? (
+            <WorkItemSheet
+              sheetId={s.id}
+              workId={s.workId ?? s.caseNumber}
+              statusColor={s.statusColor}
+              heightVh={s.heightVh}
+              tabsPinned={caseSheets.tabsPinned}
+              onClose={() => caseSheets.close(s.id)}
+              onMinimize={() => caseSheets.minimize(s.id)}
+              onResize={(vh) => caseSheets.setHeight(s.id, vh)}
+              onToggleTabsPinned={caseSheets.toggleTabsPinned}
+              onOpenLinkedCase={openCaseByNumber}
+            />
+          ) : (
+          <Suspense
             fallback={
               <div
                 className="solid-panel fixed bottom-6 right-6 px-4 py-2 text-sm flex items-center gap-2"
@@ -429,7 +506,6 @@ export default function App() {
             }
           >
           <CaseDetailSheet
-            key={s.id}
             ticket={s.ticket}
             status={s.status}
             statusColor={s.statusColor}
@@ -461,6 +537,8 @@ export default function App() {
             }}
           />
           </Suspense>
+          )}
+          </SheetErrorBoundary>
         ))}
 
       <CaseTabsBar
@@ -484,40 +562,7 @@ export default function App() {
       <PatchplanExplorer />
       <TempsExplorer sites={[...(active?.sites ?? [])]} />
       <ChatSidebar
-        onOpenCaseNumber={async (caseNumber) => {
-          // Chat replies cite cases by their bare number ("91628797");
-          // the case-detail tabs key off the Salesforce 15-char id. Try
-          // the cheapest hits first (already-loaded ticket lists, then
-          // activity log) and finally ask the backend to look it up
-          // directly so cases that rolled out of the 14-day window or
-          // sit in a closed bucket still open.
-          const inSelected = selectedTickets.find((tk) => tk.name === caseNumber);
-          if (inSelected) { handleOpenTicket(inSelected); return; }
-          const ev = events.find((e) => e.ticketId === caseNumber);
-          if (ev) {
-            handleOpenFromActivity(ev.ticketSfId, ev.caseStatus);
-            // handleOpenFromActivity bails on non-bucket cases; fall
-            // through to the backend lookup if that happens.
-            if (active?.buckets.some((b) => b.status === ev.caseStatus)) return;
-          }
-          try {
-            const hit = await lookupCaseByIdentifier("case_number", caseNumber);
-            if (!hit) return;
-            // Open with a stub ticket — CaseDetailSheet fetches the
-            // full detail itself via fetchCaseDetail(id), so we only
-            // need an id + a display name to mount the sheet.
-            const stub: RmaTicket = {
-              id: hit.caseSfId,
-              name: hit.caseNumber || caseNumber,
-              status: hit.status,
-            } as RmaTicket;
-            const bucket = active?.buckets.find((b) => b.status === hit.status);
-            caseSheets.open(stub, {
-              status: hit.status,
-              statusColor: bucket?.color ?? colorForStatus(hit.status),
-            });
-          } catch { /* ignore — user can retry */ }
-        }}
+        onOpenCaseNumber={openCaseByNumber}
         onOpenRack={(site, rack) => {
           // TempsExplorer listens on the window for this event so we
           // don't have to thread a ref through. The site must be in

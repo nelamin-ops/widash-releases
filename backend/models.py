@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator, computed_field
 
@@ -9,6 +9,9 @@ ActivityType = Literal["status_change", "comment"]
 
 GUS_URL_TEMPLATE = (
     "https://gus.lightning.force.com/lightning/r/Case/{id}/view"
+)
+WORK_ITEM_URL_TEMPLATE = (
+    "https://gus.lightning.force.com/lightning/r/ADM_Work__c/{id}/view"
 )
 
 
@@ -134,6 +137,131 @@ class RmaActiveResponse(BaseModel):
 class RmaDetailResponse(BaseModel):
     status: str
     tickets: list[RmaTicket]
+
+
+class WorkItem(BaseModel):
+    """A GUS project-management work item (ADM_Work__c) — the SF
+    engineers' own task tracking, separate from RMA cases. Surfaced
+    read-only so the whole Frankfurt (or CDG, …) team can see who is
+    blocked on what. ``name`` is the human work id ("W-23121591");
+    ``id`` is the Salesforce 18-char record id used for the deep link."""
+    id: str
+    name: str
+    subject: str
+    status: str
+    type: str = ""
+    team: str = ""
+    assignee: str = ""
+    priority: str = ""
+    # ISO timestamp of the last modification — drives the default sort.
+    lastModified: Optional[datetime] = None
+    # Bare case number this work item is linked to (via ADM_Work__c.Case__c),
+    # empty when the work item carries no case link. FRA items almost never
+    # set this today; kept so the UI can offer "open linked case" when it is.
+    caseNumber: str = ""
+    caseId: str = ""
+
+    @computed_field
+    @property
+    def gusUrl(self) -> str:
+        return WORK_ITEM_URL_TEMPLATE.format(id=self.id)
+
+
+class DetailsSegment(BaseModel):
+    """One inline run of work-item rich-text (Details field or a feed
+    post/comment). ``href`` is set (and validated http/https server-side)
+    when the run is a link; ``imageId`` carries a whitelisted Salesforce
+    ContentDocument id (069…) for an embedded image, which the frontend
+    loads through the backend image proxy. Either way the frontend builds
+    real React nodes — it never trusts raw backend HTML."""
+    text: str
+    href: str = ""
+    bold: bool = False
+    imageId: str = ""
+
+
+class DetailsBlock(BaseModel):
+    """A block of a work item's Details rich-text, parsed server-side from
+    HTML into a structured shape the frontend renders as real React nodes
+    (never raw HTML). ``kind`` selects which payload is populated:
+
+      - ``p`` / ``h``  → ``segments`` (a paragraph or heading)
+      - ``ul`` / ``ol`` → ``items`` (each list item is a run of segments)
+      - ``table``       → ``rows`` (rows → cells → segments)
+
+    GUS work items routinely carry big asset tables here (40+ rows), so
+    preserving table structure is the whole point — flattening them to
+    text was the bug."""
+    kind: str
+    segments: list["DetailsSegment"] = Field(default_factory=list)
+    items: list[list["DetailsSegment"]] = Field(default_factory=list)
+    rows: list[list[list["DetailsSegment"]]] = Field(default_factory=list)
+
+
+class WorkItemHistoryEvent(BaseModel):
+    """One tracked field change on a work item (from ADM_Work__History).
+    Drives the status-verlauf timeline in the sheet — we surface the
+    Status__c changes (and a few other meaningful fields) so the team
+    can see how a story moved through the board, by whom and when."""
+    field: str          # human field label, e.g. "Status", "Assignee"
+    oldValue: str = ""
+    newValue: str = ""
+    by: str = ""        # CreatedBy.Name of whoever made the change
+    at: Optional[datetime] = None
+
+
+class WorkItemDetail(BaseModel):
+    """Full read-only view of one ADM_Work__c, shown in its own sheet
+    tab (the work-item analogue of CaseDetailResponse). Distinct field
+    set from a Case — agile/project shape (sprint, epic, due date),
+    not asset/Coolan/patchplan."""
+    id: str
+    name: str
+    subject: str = ""
+    status: str = ""
+    storyStatus: str = ""       # Story_Status__c — Open/Closed rollup
+    type: str = ""
+    priority: str = ""
+    team: str = ""
+    assignee: str = ""
+    productOwner: str = ""      # Product_Owner__r.Name
+    qaEngineer: str = ""        # QA_Engineer__r.Name
+    storyPoints: Optional[float] = None  # Story_Points__c (agile estimate)
+    ageDays: Optional[float] = None      # Age__c — days since created
+    daysInProgress: Optional[float] = None  # Days_In_Progress__c
+    sprint: str = ""
+    epic: str = ""
+    productTag: str = ""
+    theme: str = ""             # ADM_Theme_Assignment__c → Theme.Name(s)
+    dueDate: Optional[datetime] = None
+    createdDate: Optional[datetime] = None
+    lastModified: Optional[datetime] = None
+    # Details__c is rich HTML. Parsed server-side into structured blocks
+    # (paragraphs, headings, lists, tables) of inline segments so the FE
+    # can render structure + clickable links without ever touching raw
+    # backend HTML. ``details`` is the same content flattened to plain
+    # text (kept for chat/search).
+    details: str = ""
+    detailsBlocks: list[DetailsBlock] = Field(default_factory=list)
+    caseNumber: str = ""
+    caseId: str = ""
+    # Newest-first list of tracked field changes (status verlauf).
+    history: list[WorkItemHistoryEvent] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def gusUrl(self) -> str:
+        return WORK_ITEM_URL_TEMPLATE.format(id=self.id)
+
+
+class WorkItemsResponse(BaseModel):
+    items: list[WorkItem] = Field(default_factory=list)
+    # Site codes the active report covers — echoed back so the FE can
+    # label the section ("Frankfurt work items") without a second call.
+    sites: list[str] = Field(default_factory=list)
+    fetchedAt: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class ActivityResponse(BaseModel):

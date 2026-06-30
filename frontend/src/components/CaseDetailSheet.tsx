@@ -66,7 +66,9 @@ function extractRoomRack(ticket: RmaTicket): { room: string; rack: string } {
 }
 
 function extractMachineUuid(ticket: RmaTicket): string | null {
-  for (const l of ticket.coolanLinks) {
+  // ?? [] — a ticket opened from a search / chat lookup is a stub
+  // (id + name + status only); coolanLinks arrives with the detail fetch.
+  for (const l of ticket.coolanLinks ?? []) {
     const m = UUID_RE.exec(l.url);
     if (m) return m[1].toLowerCase();
   }
@@ -300,7 +302,7 @@ export function CaseDetailSheet({
   // Coolan's UI; means "safe to work on this device"), missing = red,
   // unknown / no record = muted.
   const coolanState = ticket.coolanReportingState;
-  const hasCoolan = ticket.coolanLinks.length > 0;
+  const hasCoolan = (ticket.coolanLinks?.length ?? 0) > 0;
   const coolanColor =
     coolanState === "active" ? "text-emerald-600 dark:text-emerald-300"
     : coolanState === "delayed" ? "text-slate-500 dark:text-slate-400"

@@ -11,25 +11,35 @@ const MIN_HEIGHT_VH = 30;
 const MAX_HEIGHT_VH = 100;
 
 export interface CaseSheet {
-  /** Salesforce case Id (the route key — stable, unlike CaseNumber). */
+  /** Salesforce record Id (the route key — stable, unlike the number).
+   *  For work items this is the ADM_Work__c id; the work id ("W-…")
+   *  rides along in ``workId``. */
   id: string;
-  /** Display label, e.g. "90524212". */
+  /** Which entity this tab shows. Absent in older persisted state →
+   *  treated as "case" so existing saved tabs keep working. */
+  kind?: "case" | "workitem";
+  /** Display label, e.g. "90524212" (case) or "W-23124643" (work item). */
   caseNumber: string;
   /** Status from the bucket — used for accent colour on the tab. */
   status?: string;
   statusColor?: string;
   /** Snapshot of the ticket so the sheet stays useful even after a refresh. */
   ticket: RmaTicket;
+  /** Work-item only: the human work id ("W-…") used for the detail
+   *  fetch. The sheet keys its backend call off this, not the SF id. */
+  workId?: string;
   minimized: boolean;
   heightVh: number;
 }
 
 interface PersistedSheet {
   id: string;
+  kind?: "case" | "workitem";
   caseNumber: string;
   status?: string;
   statusColor?: string;
   ticket: RmaTicket;
+  workId?: string;
   minimized: boolean;
   heightVh: number;
 }
@@ -134,6 +144,53 @@ export function useCaseSheets() {
     [],
   );
 
+  /** Open (or focus) a work-item sheet. Mirrors ``open`` but tags the
+   *  sheet ``kind: "workitem"`` and carries the work id for the detail
+   *  fetch. Reuses the same stack + tab bar as cases, so at most one
+   *  sheet (of either kind) is maximized at a time. */
+  const openWorkItem = useCallback(
+    (
+      wi: { id: string; workId: string; subject: string; status?: string },
+      meta: { statusColor?: string },
+    ) => {
+      setSheets((prev) => {
+        const preferred = loadPreferredHeight();
+        const existing = prev.find((s) => s.id === wi.id);
+        if (existing) {
+          return prev.map((s) =>
+            s.id === wi.id
+              ? { ...s, minimized: false, heightVh: preferred }
+              : { ...s, minimized: true },
+          );
+        }
+        const minimised = prev.map((s) => ({ ...s, minimized: true }));
+        // Work items don't have an RmaTicket; synthesise a minimal one
+        // so the shared CaseSheet shape stays satisfied. Only id / name
+        // / status are read on the work-item path.
+        const stubTicket = {
+          id: wi.id,
+          name: wi.workId,
+          status: wi.status ?? "",
+        } as RmaTicket;
+        return [
+          ...minimised,
+          {
+            id: wi.id,
+            kind: "workitem" as const,
+            caseNumber: wi.workId,
+            status: wi.status,
+            statusColor: meta.statusColor,
+            ticket: stubTicket,
+            workId: wi.workId,
+            minimized: false,
+            heightVh: preferred,
+          },
+        ];
+      });
+    },
+    [],
+  );
+
   const close = useCallback((id: string) => {
     setSheets((prev) => prev.filter((s) => s.id !== id));
   }, []);
@@ -200,7 +257,7 @@ export function useCaseSheets() {
   );
 
   return {
-    sheets, open, close, minimize, restore, setHeight,
+    sheets, open, openWorkItem, close, minimize, restore, setHeight,
     updateTicket, updateStatus,
     tabsPinned, toggleTabsPinned,
   };

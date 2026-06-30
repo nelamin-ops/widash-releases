@@ -58,6 +58,13 @@ export interface SheetSection {
 /* --- Mock data, modelled on Case 87498113 / Tech_Asset__c a2OB0…ls -------- */
 
 export function buildMockSections(ticket: RmaTicket): SheetSection[] {
+  // A ticket opened from a search / chat lookup is a stub — only
+  // id / name / status are set; the rest arrives with the detail fetch
+  // that supersedes these mock sections moments later. Default the
+  // fields this fallback reads so the first render can't crash on a
+  // stub (undefined.split / undefined value). See CLAUDE.md white-screen.
+  const assetName = ticket.assetName ?? "";
+  const assetParts = assetName.split("/");
   return [
     {
       kind: "case",
@@ -168,22 +175,22 @@ export function buildMockSections(ticket: RmaTicket): SheetSection[] {
     {
       kind: "asset",
       title: "Asset",
-      subtitle: ticket.assetName,
+      subtitle: assetName,
       groups: [
         {
           title: "Identification",
           fields: [
             { apiName: "Name", label: "Asset name",
-              value: ticket.assetName,
+              value: assetName,
               type: "text", editable: true, sobject: "Tech_Asset__c", wide: true, mono: true },
             { apiName: "Asset_Number__c", label: "Asset number",
-              value: ticket.assetName.split("/")[0]?.trim() ?? "",
+              value: assetParts[0]?.trim() ?? "",
               type: "text", editable: true, sobject: "Tech_Asset__c", mono: true },
             { apiName: "Tech_Ops_Serial_Number__c", label: "Serial number",
-              value: ticket.assetName.split("/")[1]?.trim() ?? "",
+              value: assetParts[1]?.trim() ?? "",
               type: "text", editable: true, sobject: "Tech_Asset__c", mono: true },
             { apiName: "Device_Name__c", label: "Hostname",
-              value: ticket.assetName.split("/")[2]?.trim() ?? "",
+              value: assetParts[2]?.trim() ?? "",
               type: "text", editable: true, sobject: "Tech_Asset__c", mono: true },
             { apiName: "Estates_Role__c", label: "Estates role",
               value: "baseline",
@@ -224,7 +231,7 @@ export function buildMockSections(ticket: RmaTicket): SheetSection[] {
               value: "9440C93591DE",
               type: "text", editable: true, sobject: "Tech_Asset__c", mono: true },
             { apiName: "Discovered_Host_Name__c", label: "Discovered hostname",
-              value: ticket.assetName.split("/")[2]?.trim() ?? "",
+              value: assetParts[2]?.trim() ?? "",
               type: "text", editable: true, sobject: "Tech_Asset__c", mono: true },
           ],
         },

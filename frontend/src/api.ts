@@ -6,6 +6,9 @@ import type {
   CoolanComponentsResponse,
   RmaActiveResponse,
   RmaDetailResponse,
+  WorkItemDetail,
+  WorkItemsResponse,
+  WorkItemFeedResponse,
 } from "./types";
 
 async function handle<T>(res: Response): Promise<T> {
@@ -109,6 +112,25 @@ export function refresh(): Promise<{ status: string }> {
   return apiFetch("/api/refresh", { method: "POST" }).then(handle<{ status: string }>);
 }
 
+export function fetchWorkItems(limit = 200): Promise<WorkItemsResponse> {
+  return apiFetch(`/api/work-items?limit=${limit}`)
+    .then(handle<WorkItemsResponse>);
+}
+
+export function fetchWorkItemDetail(
+  identifier: string,
+): Promise<WorkItemDetail> {
+  return apiFetch(`/api/work-item/${encodeURIComponent(identifier)}`)
+    .then(handle<WorkItemDetail>);
+}
+
+export function fetchWorkItemFeed(
+  workSfId: string,
+): Promise<WorkItemFeedResponse> {
+  return apiFetch(`/api/work-item/${encodeURIComponent(workSfId)}/feed`)
+    .then(handle<WorkItemFeedResponse>);
+}
+
 export function fetchCaseDetail(caseId: string): Promise<CaseDetailResponse> {
   return apiFetch(`/api/case/${encodeURIComponent(caseId)}`)
     .then(handle<CaseDetailResponse>);
@@ -118,6 +140,8 @@ export interface CaseLookupResult {
   caseSfId: string;
   caseNumber: string;
   status: string;
+  subject?: string;
+  location?: string;
   reportId: string;
 }
 
